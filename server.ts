@@ -130,7 +130,7 @@ function startServer() {
       createViteServer({
         server: {
           middlewareMode: true,
-          hmr: process.env.DISABLE_HMR !== 'true',
+          hmr: false,
           watch: process.env.DISABLE_HMR === 'true' ? null : {},
         },
         appType: 'spa',
