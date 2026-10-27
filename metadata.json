@@ -1,0 +1,6 @@
+{
+  "name": "ResiMed MI - Censo Clínico, Notas de Evolución & Respaldo Médico",
+  "description": "Sistema clínico integral para residentes de Medicina Interna: censo imprimible en hoja carta horizontal, generador ágil de notas de evolución, seguimiento de antibióticos por día, tendencias de laboratorio y respaldo inmutable.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
