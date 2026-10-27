@@ -14,6 +14,11 @@ import {
   History,
   ArrowRightLeft,
   Sparkles,
+  Copy,
+  Check,
+  FileJson,
+  Download,
+  Upload,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import {
@@ -24,6 +29,7 @@ import {
   downloadCensusFromDrive,
   saveCensusToDrive,
   DriveFileInfo,
+  getFirebaseProjectId,
 } from '../utils/googleDriveSync.ts';
 import { BackupPackage, savePatients, saveNotes, loadPatients, loadNotes } from '../utils/storage.ts';
 import { Patient, ClinicalNoteRecord, ResidentProfile } from '../types/clinical.ts';
@@ -66,10 +72,17 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isUnauthorizedDomainError, setIsUnauthorizedDomainError] = useState<boolean>(false);
+  const [copiedDomain, setCopiedDomain] = useState<boolean>(false);
   const [driveFileInfo, setDriveFileInfo] = useState<DriveFileInfo | null>(null);
   const [pendingMutations, setPendingMutations] = useState<OfflineMutation[]>([]);
   const [lastSyncResult, setLastSyncResult] = useState<MergeStats | null>(null);
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
+  const fileMergeInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const currentDomain =
+    typeof window !== 'undefined' ? window.location.hostname || 'localhost' : 'localhost';
+  const firebaseProjectId = getFirebaseProjectId();
 
   // Confirmation dialog state for Drive actions
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -120,6 +133,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
   const handleLogin = async () => {
     setIsLoading(true);
     setErrorMsg(null);
+    setIsUnauthorizedDomainError(false);
     try {
       const res = await googleSignIn();
       if (res) {
@@ -129,9 +143,95 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
         showToast(`Conectado a Google Drive como ${res.user.displayName || res.user.email}`);
       }
     } catch (e: any) {
-      setErrorMsg(e.message || 'Error al autenticar con Google');
+      const code = e?.code || '';
+      const msg = e?.message || '';
+      if (code === 'auth/unauthorized-domain' || msg.includes('auth/unauthorized-domain')) {
+        setIsUnauthorizedDomainError(true);
+        setErrorMsg(
+          `El dominio actual (${currentDomain}) aún no está autorizado en Firebase Authentication para iniciar sesión con Google.`
+        );
+      } else {
+        setErrorMsg(msg || 'Error al autenticar con Google');
+      }
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Direct Smart Merge via local/shared JSON file (works on any domain, mobile app, AirDrop, WhatsApp, or Google Drive desktop folder without OAuth)
+  const handleExportSharedCensusFile = () => {
+    const localPatients = loadPatients();
+    const localNotes = loadNotes();
+    const now = new Date().toISOString();
+    const pkg: BackupPackage = {
+      version: '1.1.0',
+      exportDate: now,
+      residentAuthor: profile.name,
+      patients: localPatients,
+      notes: localNotes,
+      integrityHash: generateAuditHash(
+        'SHARED-MERGE',
+        now,
+        `${localPatients.length}:${localNotes.length}`
+      ),
+    };
+    const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'ResiMed-Censo-MI.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Archivo ResiMed-Censo-MI.json descargado para compartir o guardar en Drive.');
+  };
+
+  const handleMergeFromSelectedFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsLoading(true);
+    setErrorMsg(null);
+    try {
+      const text = await file.text();
+      const remotePackage = JSON.parse(text) as BackupPackage;
+      if (!remotePackage.patients || !Array.isArray(remotePackage.patients)) {
+        throw new Error('El archivo seleccionado no tiene un formato de censo ResiMed válido.');
+      }
+      const localPatients = loadPatients();
+      const localNotes = loadNotes();
+      const now = new Date().toISOString();
+      const localPackage: BackupPackage = {
+        version: '1.1.0',
+        exportDate: now,
+        residentAuthor: profile.name,
+        patients: localPatients,
+        notes: localNotes,
+        integrityHash: generateAuditHash(
+          'LOCAL-PKG',
+          now,
+          `${localPatients.length}:${localNotes.length}`
+        ),
+      };
+
+      const { merged, stats } = mergeCensusData(localPackage, remotePackage, profile.name);
+      savePatients(merged.patients);
+      saveNotes(merged.notes);
+      clearPendingMutations();
+      setPendingMutations([]);
+      setLastSyncTime(now);
+      setLastSyncResult(stats);
+      onDataSynced();
+      showToast(
+        `¡Fusión por archivo exitosa! +${stats.addedRemotePatients} pacientes nuevos importados, ${stats.updatedPatients} actualizados (${stats.totalPatients} totales).`
+      );
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Error al fusionar el archivo JSON seleccionado.');
+    } finally {
+      setIsLoading(false);
+      if (fileMergeInputRef.current) {
+        fileMergeInputRef.current.value = '';
+      }
     }
   };
 
@@ -595,11 +695,115 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
           )}
 
           {errorMsg && (
-            <div className="p-3 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 rounded-xl border border-rose-200 dark:border-rose-900/50 flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{errorMsg}</span>
+            <div className="p-3.5 bg-rose-50 dark:bg-rose-950/40 text-rose-800 dark:text-rose-200 rounded-2xl border border-rose-200 dark:border-rose-900/60 space-y-2.5">
+              <div className="flex items-start gap-2 font-semibold">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                <span>{errorMsg}</span>
+              </div>
+
+              {isUnauthorizedDomainError && (
+                <div className="p-3 bg-white dark:bg-slate-900 rounded-xl border border-rose-200 dark:border-rose-800/80 text-slate-700 dark:text-slate-300 space-y-2 text-[11px]">
+                  <p className="font-bold text-slate-900 dark:text-white">
+                    ¿Por qué aparece <code>auth/unauthorized-domain</code> al exportar desde GitHub?
+                  </p>
+                  <p className="leading-relaxed">
+                    Por seguridad, Firebase bloquea el inicio de sesión de Google en dominios nuevos hasta que agregues el dominio a la lista blanca de tu proyecto. Se resuelve en <strong>30 segundos</strong>:
+                  </p>
+                  <ol className="list-decimal list-inside space-y-1 text-[11px]">
+                    <li>
+                      Copia este dominio exacto donde estás abriendo la app:
+                      <div className="mt-1 flex items-center gap-2">
+                        <code className="px-2.5 py-1 bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg font-mono font-bold text-teal-700 dark:text-teal-300">
+                          {currentDomain}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await navigator.clipboard.writeText(currentDomain);
+                            setCopiedDomain(true);
+                            setTimeout(() => setCopiedDomain(false), 2000);
+                          }}
+                          className="px-2.5 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-bold text-[10px] flex items-center gap-1 cursor-pointer"
+                        >
+                          {copiedDomain ? (
+                            <>
+                              <Check className="w-3 h-3" />
+                              <span>¡Copiado!</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span>Copiar dominio</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </li>
+                    <li>
+                      Entra a{' '}
+                      <a
+                        href={`https://console.firebase.google.com/project/${firebaseProjectId}/authentication/settings`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-teal-600 dark:text-teal-400 font-bold underline"
+                      >
+                        Firebase Console → Authentication → Settings → Dominios autorizados
+                      </a>{' '}
+                      (Proyecto: <code>{firebaseProjectId}</code>).
+                    </li>
+                    <li>
+                      Haz clic en <strong>"Agregar dominio" (Add domain)</strong>, pega{' '}
+                      <code>{currentDomain}</code> (y si usas Capacitor móvil agrega también{' '}
+                      <code>localhost</code>) y guarda.
+                    </li>
+                  </ol>
+                </div>
+              )}
             </div>
           )}
+
+          {/* Universal Smart Merge by File (Works anywhere without OAuth / Domain Whitelisting) */}
+          <div className="p-4 bg-slate-50 dark:bg-slate-850 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <FileJson className="w-4 h-4 text-teal-600 dark:text-teal-400 shrink-0" />
+                <div>
+                  <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                    Fusión Inteligente Directa por Archivo (Sin requerir Login ni Dominio Autorizado)
+                  </h4>
+                  <p className="text-[10.5px] text-slate-500">
+                    Funciona en cualquier servidor, GitHub, Android/iOS, carpeta de Google Drive de escritorio, WhatsApp o AirDrop usando el mismo motor Smart Merge sin perder ningún ingreso.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleExportSharedCensusFile}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-xl font-bold text-[11px] cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-teal-600" />
+                <span>1. Exportar Mi Censo (ResiMed-Censo-MI.json)</span>
+              </button>
+              <input
+                ref={fileMergeInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={handleMergeFromSelectedFile}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileMergeInputRef.current?.click()}
+                disabled={isLoading}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-bold text-[11px] shadow-xs cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>2. Fusionar con Archivo .json de Compañero / Drive (Smart Merge)</span>
+              </button>
+            </div>
+          </div>
 
           <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
             <PWAInstallButton variant="full" />

@@ -21,7 +21,9 @@ const provider = new GoogleAuthProvider();
 provider.addScope(DRIVE_FILE_SCOPE);
 
 let isSigningIn = false;
-let cachedAccessToken: string | null = null;
+const SESSION_TOKEN_KEY = 'resimed_gdrive_access_token_v1';
+let cachedAccessToken: string | null =
+  typeof window !== 'undefined' ? sessionStorage.getItem(SESSION_TOKEN_KEY) : null;
 
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
@@ -37,6 +39,9 @@ export const initAuth = (
       }
     } else {
       cachedAccessToken = null;
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem(SESSION_TOKEN_KEY);
+      }
       if (onAuthFailure) onAuthFailure();
     }
   });
@@ -52,6 +57,9 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     }
 
     cachedAccessToken = credential.accessToken;
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem(SESSION_TOKEN_KEY, cachedAccessToken);
+    }
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
     console.error('Error al iniciar sesión con Google:', error);
@@ -68,7 +76,14 @@ export const getAccessToken = async (): Promise<string | null> => {
 export const googleLogout = async (): Promise<void> => {
   await signOut(auth);
   cachedAccessToken = null;
+  if (typeof window !== 'undefined') {
+    sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  }
 };
+
+export function getFirebaseProjectId(): string {
+  return firebaseConfig.projectId || 'gen-lang-client-0796485781';
+}
 
 export interface DriveFileInfo {
   id: string;

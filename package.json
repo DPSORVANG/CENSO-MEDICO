@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --platform=node --format=esm --packages=external --bundle --outfile=server.js",
+    "build:mobile": "vite build",
     "start": "node server.js",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
