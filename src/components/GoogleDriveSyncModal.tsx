@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Cloud,
   CloudUpload,
@@ -19,19 +19,30 @@ import {
   FileJson,
   Download,
   Upload,
+  Trash2,
 } from 'lucide-react';
-import { User } from 'firebase/auth';
 import {
   googleSignIn,
   googleLogout,
   getAccessToken,
+  getSavedDriveUser,
   findDriveCensusFile,
   downloadCensusFromDrive,
   saveCensusToDrive,
   DriveFileInfo,
   getFirebaseProjectId,
 } from '../utils/googleDriveSync.ts';
-import { BackupPackage, savePatients, saveNotes, loadPatients, loadNotes } from '../utils/storage.ts';
+import {
+  BackupPackage,
+  savePatients,
+  saveNotes,
+  loadPatients,
+  loadNotes,
+  loadDeletedPatients,
+  saveDeletedPatients,
+  clearAllPatientsInCurrentNamespace,
+  normalizePatientRecord,
+} from '../utils/storage.ts';
 import { Patient, ClinicalNoteRecord, ResidentProfile } from '../types/clinical.ts';
 import { generateAuditHash } from '../utils/clinicalLogic.ts';
 import {
@@ -54,6 +65,8 @@ interface GoogleDriveSyncModalProps {
   isAdmin: boolean;
   onRequestAdminMode: () => void;
   onDataSynced: () => void;
+  onDriveSessionChanged?: () => void;
+  onAuthenticatedWithDrive?: (accessToken: string, email: string, displayName: string) => Promise<void>;
   showToast: (msg: string) => void;
   isOnline?: boolean;
 }
@@ -65,10 +78,12 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
   notes,
   profile,
   onDataSynced,
+  onDriveSessionChanged,
+  onAuthenticatedWithDrive,
   showToast,
   isOnline = true,
 }) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [savedUser, setSavedUser] = useState(() => getSavedDriveUser());
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -78,31 +93,29 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
   const [pendingMutations, setPendingMutations] = useState<OfflineMutation[]>([]);
   const [lastSyncResult, setLastSyncResult] = useState<MergeStats | null>(null);
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
-  const fileMergeInputRef = React.useRef<HTMLInputElement | null>(null);
+  const fileMergeInputRef = useRef<HTMLInputElement | null>(null);
 
   const currentDomain =
     typeof window !== 'undefined' ? window.location.hostname || 'localhost' : 'localhost';
   const firebaseProjectId = getFirebaseProjectId();
 
-  // Confirmation dialog state for Drive actions
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
-    type: 'merge' | 'upload' | 'download';
+    type: 'pull' | 'upload' | 'clear_all';
     title: string;
     description: string;
-    previewCount?: { patients: number; notes: number };
   }>({
     isOpen: false,
-    type: 'merge',
+    type: 'pull',
     title: '',
     description: '',
   });
 
-  // Check auth state and pending mutations on mount/open
   useEffect(() => {
     if (!isOpen) return;
 
     setPendingMutations(getPendingMutations());
+    setSavedUser(getSavedDriveUser());
 
     const checkToken = async () => {
       const token = await getAccessToken();
@@ -111,6 +124,8 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
         if (isOnline) {
           fetchDriveFileInfo(token);
         }
+      } else {
+        setAccessToken(null);
       }
     };
     checkToken();
@@ -123,8 +138,13 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
       const file = await findDriveCensusFile(token);
       setDriveFileInfo(file);
     } catch (e: any) {
-      console.error('Error al consultar Drive:', e);
-      setErrorMsg(e.message || 'No se pudo consultar Google Drive.');
+      if (e?.message === 'DRIVE_TOKEN_EXPIRED') {
+        setAccessToken(null);
+        setErrorMsg('La sesión de Google Drive expiró. Vuelve a iniciar sesión para sincronizar.');
+      } else {
+        console.error('Error al consultar Drive:', e);
+        setErrorMsg(e.message || 'No se pudo consultar Google Drive.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -137,10 +157,15 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
     try {
       const res = await googleSignIn();
       if (res) {
-        setCurrentUser(res.user);
+        const email = res.user.email || res.user.uid;
+        const displayName = res.user.displayName || email;
+        setSavedUser({ email, displayName, uid: res.user.uid });
         setAccessToken(res.accessToken);
+        if (onAuthenticatedWithDrive) {
+          await onAuthenticatedWithDrive(res.accessToken, email, displayName);
+        }
         await fetchDriveFileInfo(res.accessToken);
-        showToast(`Conectado a Google Drive como ${res.user.displayName || res.user.email}`);
+        showToast(`Conectado a Google Drive (${email}) • Sincronización simultánea activa`);
       }
     } catch (e: any) {
       const code = e?.code || '';
@@ -158,17 +183,193 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
     }
   };
 
-  // Direct Smart Merge via local/shared JSON file (works on any domain, mobile app, AirDrop, WhatsApp, or Google Drive desktop folder without OAuth)
+  const handleLogout = async () => {
+    await googleLogout();
+    setSavedUser(null);
+    setAccessToken(null);
+    setDriveFileInfo(null);
+    showToast('Sesión de Google Drive cerrada.');
+    if (onDriveSessionChanged) {
+      onDriveSessionChanged();
+    }
+    onClose();
+  };
+
+  // Pull latest authoritative state from Google Drive (or push if no file in Drive yet)
+  const executeAuthoritativeSyncWithDrive = async () => {
+    if (!accessToken) return;
+    setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+    setIsLoading(true);
+    setErrorMsg(null);
+
+    try {
+      const now = new Date().toISOString();
+      const existingFile = await findDriveCensusFile(accessToken);
+
+      if (existingFile) {
+        const downloadResult = await downloadCensusFromDrive(existingFile.id, accessToken);
+        const remotePkg = downloadResult.data;
+        const pending = getPendingMutations();
+
+        if (pending.length === 0) {
+          // No offline pending mutations: Google Drive is 100% authoritative!
+          const remoteTombstones = remotePkg.deletedPatientIds || {};
+          saveDeletedPatients(remoteTombstones);
+          const cleanRemotePatients = (remotePkg.patients || []).map(normalizePatientRecord);
+          savePatients(cleanRemotePatients);
+          saveNotes(remotePkg.notes || []);
+          setLastSyncTime(now);
+          setLastSyncResult({
+            addedRemotePatients: 0,
+            addedLocalPatients: 0,
+            updatedPatients: cleanRemotePatients.length,
+            addedNotes: 0,
+            totalPatients: cleanRemotePatients.length,
+            totalNotes: (remotePkg.notes || []).length,
+            timestamp: now,
+          });
+          onDataSynced();
+          await fetchDriveFileInfo(accessToken);
+          showToast(
+            `¡Censo actualizado desde Google Drive! (${cleanRemotePatients.length} pacientes activos en Drive)`
+          );
+        } else {
+          // Had offline changes: reconcile offline mutations with Drive and upload
+          const localPackage: BackupPackage = {
+            version: '2.0.0',
+            exportDate: now,
+            residentAuthor: profile.name,
+            patients: loadPatients(),
+            notes: loadNotes(),
+            deletedPatientIds: loadDeletedPatients(),
+            integrityHash: '',
+          };
+          const { merged, stats } = mergeCensusData(localPackage, remotePkg, profile.name);
+          savePatients(merged.patients);
+          saveNotes(merged.notes);
+          await saveCensusToDrive(merged, accessToken);
+          clearPendingMutations();
+          setPendingMutations([]);
+          setLastSyncTime(now);
+          setLastSyncResult(stats);
+          onDataSynced();
+          await fetchDriveFileInfo(accessToken);
+          showToast(
+            `¡Cambios fuera de línea sincronizados con Google Drive! (${stats.totalPatients} pacientes activos)`
+          );
+        }
+      } else {
+        // First time creating file in Drive
+        const initialPkg: BackupPackage = {
+          version: '2.0.0',
+          exportDate: now,
+          residentAuthor: profile.name,
+          patients: loadPatients(),
+          notes: loadNotes(),
+          deletedPatientIds: loadDeletedPatients(),
+          profile,
+          integrityHash: generateAuditHash('DRIVE-INIT', now, `${patients.length}:${notes.length}`),
+        };
+        await saveCensusToDrive(initialPkg, accessToken);
+        clearPendingMutations();
+        setPendingMutations([]);
+        setLastSyncTime(now);
+        await fetchDriveFileInfo(accessToken);
+        showToast('¡Archivo ResiMed-Censo-MI.json creado en tu Google Drive!');
+      }
+    } catch (e: any) {
+      console.error('Error en sincronización con Drive:', e);
+      setErrorMsg(e.message || 'Error al sincronizar con Google Drive.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Overwrite Google Drive with current screen state
+  const executeUploadToDrive = async () => {
+    if (!accessToken) return;
+    setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+    setIsLoading(true);
+    setErrorMsg(null);
+
+    try {
+      const now = new Date().toISOString();
+      const backupData: BackupPackage = {
+        version: '2.0.0',
+        exportDate: now,
+        residentAuthor: profile.name,
+        patients: loadPatients(),
+        notes: loadNotes(),
+        deletedPatientIds: loadDeletedPatients(),
+        profile,
+        integrityHash: generateAuditHash('DRIVE-SYNC', now, `${patients.length}:${notes.length}`),
+      };
+
+      await saveCensusToDrive(backupData, accessToken);
+      clearPendingMutations();
+      setPendingMutations([]);
+      setLastSyncTime(now);
+      await fetchDriveFileInfo(accessToken);
+      showToast('¡Estado actual de esta pantalla guardado como definitivo en Google Drive!');
+    } catch (e: any) {
+      console.error('Error al subir a Drive:', e);
+      setErrorMsg(e.message || 'Error al guardar en Google Drive.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Clear ALL patients in local & Google Drive (to start completely empty with 0 patients)
+  const executeClearAllPatientsInDrive = async () => {
+    setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+    setIsLoading(true);
+    setErrorMsg(null);
+
+    try {
+      const updatedTombstones = clearAllPatientsInCurrentNamespace();
+      clearPendingMutations();
+      setPendingMutations([]);
+      const now = new Date().toISOString();
+
+      if (accessToken && isOnline) {
+        const emptyPackage: BackupPackage = {
+          version: '2.0.0',
+          exportDate: now,
+          residentAuthor: profile.name,
+          patients: [],
+          notes: loadNotes(),
+          deletedPatientIds: updatedTombstones,
+          profile,
+          integrityHash: generateAuditHash('DRIVE-CLEAR', now, `0:${notes.length}`),
+        };
+        await saveCensusToDrive(emptyPackage, accessToken);
+        await fetchDriveFileInfo(accessToken);
+      }
+
+      setLastSyncTime(now);
+      onDataSynced();
+      showToast('¡Censo vaciado por completo (0 pacientes) en este dispositivo y en Google Drive!');
+    } catch (e: any) {
+      setErrorMsg(e.message || 'Error al vaciar el censo en Google Drive.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Direct Smart Merge via local/shared JSON file
   const handleExportSharedCensusFile = () => {
     const localPatients = loadPatients();
     const localNotes = loadNotes();
+    const deletedPatientIds = loadDeletedPatients();
     const now = new Date().toISOString();
     const pkg: BackupPackage = {
-      version: '1.1.0',
+      version: '2.0.0',
       exportDate: now,
       residentAuthor: profile.name,
       patients: localPatients,
       notes: localNotes,
+      deletedPatientIds,
+      profile,
       integrityHash: generateAuditHash(
         'SHARED-MERGE',
         now,
@@ -184,7 +385,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    showToast('Archivo ResiMed-Censo-MI.json descargado para compartir o guardar en Drive.');
+    showToast('Archivo ResiMed-Censo-MI.json descargado.');
   };
 
   const handleMergeFromSelectedFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -200,13 +401,15 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
       }
       const localPatients = loadPatients();
       const localNotes = loadNotes();
+      const deletedPatientIds = loadDeletedPatients();
       const now = new Date().toISOString();
       const localPackage: BackupPackage = {
-        version: '1.1.0',
+        version: '2.0.0',
         exportDate: now,
         residentAuthor: profile.name,
         patients: localPatients,
         notes: localNotes,
+        deletedPatientIds,
         integrityHash: generateAuditHash(
           'LOCAL-PKG',
           now,
@@ -217,176 +420,24 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
       const { merged, stats } = mergeCensusData(localPackage, remotePackage, profile.name);
       savePatients(merged.patients);
       saveNotes(merged.notes);
+      if (accessToken && isOnline) {
+        await saveCensusToDrive(merged, accessToken);
+      }
       clearPendingMutations();
       setPendingMutations([]);
       setLastSyncTime(now);
       setLastSyncResult(stats);
       onDataSynced();
       showToast(
-        `¡Fusión por archivo exitosa! +${stats.addedRemotePatients} pacientes nuevos importados, ${stats.updatedPatients} actualizados (${stats.totalPatients} totales).`
+        `¡Censo actualizado desde archivo! (${stats.totalPatients} pacientes activos)`
       );
     } catch (err: any) {
-      setErrorMsg(err?.message || 'Error al fusionar el archivo JSON seleccionado.');
+      setErrorMsg(err?.message || 'Error al procesar el archivo JSON seleccionado.');
     } finally {
       setIsLoading(false);
       if (fileMergeInputRef.current) {
         fileMergeInputRef.current.value = '';
       }
-    }
-  };
-
-  const handleLogout = async () => {
-    await googleLogout();
-    setCurrentUser(null);
-    setAccessToken(null);
-    setDriveFileInfo(null);
-    showToast('Sesión de Google Drive cerrada');
-  };
-
-  // 1. Primary Action: Smart Bidirectional Merge
-  const requestSmartMerge = () => {
-    setConfirmDialog({
-      isOpen: true,
-      type: 'merge',
-      title: '¿Sincronizar y Fusionar Censo (Smart Merge)?',
-      description:
-        'Esta acción inteligente unificará los datos de esta computadora con la versión de Google Drive. Los ingresos de pacientes de tus compañeros se agregarán a tu lista, tus nuevos pacientes se subirán a la nube y los cambios a un mismo paciente (nuevos labs, notas, recetas o tags) se combinarán sin borrar el trabajo de nadie.',
-      previewCount: { patients: patients.length, notes: notes.length },
-    });
-  };
-
-  const executeSmartMerge = async () => {
-    if (!accessToken) return;
-    setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
-    setIsLoading(true);
-    setErrorMsg(null);
-
-    try {
-      const localPatients = loadPatients();
-      const localNotes = loadNotes();
-      const now = new Date().toISOString();
-
-      const localPackage: BackupPackage = {
-        version: '1.1.0',
-        exportDate: now,
-        residentAuthor: profile.name,
-        patients: localPatients,
-        notes: localNotes,
-        integrityHash: generateAuditHash('LOCAL-PKG', now, `${localPatients.length}:${localNotes.length}`),
-      };
-
-      let remotePackage: BackupPackage;
-      const existingFile = await findDriveCensusFile(accessToken);
-
-      if (existingFile) {
-        const downloadResult = await downloadCensusFromDrive(existingFile.id, accessToken);
-        remotePackage = downloadResult.data;
-      } else {
-        // First time uploading
-        remotePackage = {
-          version: '1.1.0',
-          exportDate: now,
-          residentAuthor: profile.name,
-          patients: [],
-          notes: [],
-          integrityHash: '',
-        };
-      }
-
-      // Execute smart merge
-      const { merged, stats } = mergeCensusData(localPackage, remotePackage, profile.name);
-
-      // Persist merged data locally
-      savePatients(merged.patients);
-      saveNotes(merged.notes);
-
-      // Persist merged data to Google Drive
-      await saveCensusToDrive(merged, accessToken);
-
-      // Clear mutation queue and record sync time
-      clearPendingMutations();
-      setPendingMutations([]);
-      setLastSyncTime(now);
-      setLastSyncResult(stats);
-
-      // Notify parent to refresh patient state
-      onDataSynced();
-      await fetchDriveFileInfo(accessToken);
-
-      showToast(
-        `¡Fusión exitosa! +${stats.addedRemotePatients} pacientes nuevos importados, ${stats.updatedPatients} actualizados y ${stats.totalPatients} totales en censo.`
-      );
-    } catch (e: any) {
-      console.error('Error en Smart Merge:', e);
-      setErrorMsg(e.message || 'Error al ejecutar la fusión inteligente con Google Drive.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // 2. Emergency Upload
-  const executeUploadToDrive = async () => {
-    if (!accessToken) return;
-    setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
-    setIsLoading(true);
-    setErrorMsg(null);
-
-    try {
-      const now = new Date().toISOString();
-      const backupData: BackupPackage = {
-        version: '1.1.0',
-        exportDate: now,
-        residentAuthor: profile.name,
-        patients,
-        notes,
-        integrityHash: generateAuditHash('DRIVE-SYNC', now, `${patients.length}:${notes.length}`),
-      };
-
-      const result = await saveCensusToDrive(backupData, accessToken);
-      clearPendingMutations();
-      setPendingMutations([]);
-      setLastSyncTime(now);
-      await fetchDriveFileInfo(accessToken);
-      showToast(
-        result.isNew
-          ? '¡Censo creado exitosamente en Google Drive!'
-          : '¡Censo subido a Google Drive!'
-      );
-    } catch (e: any) {
-      console.error('Error al subir a Drive:', e);
-      setErrorMsg(e.message || 'Error al guardar en Google Drive.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // 3. Emergency Download
-  const executeDownloadFromDrive = async () => {
-    if (!accessToken || !driveFileInfo) return;
-    setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
-    setIsLoading(true);
-    setErrorMsg(null);
-
-    try {
-      const result = await downloadCensusFromDrive(driveFileInfo.id, accessToken);
-      const pkg = result.data;
-      if (pkg.patients && Array.isArray(pkg.patients)) {
-        savePatients(pkg.patients);
-        if (pkg.notes && Array.isArray(pkg.notes)) {
-          saveNotes(pkg.notes);
-        }
-        clearPendingMutations();
-        setPendingMutations([]);
-        onDataSynced();
-        showToast(`Censo descargado: ${pkg.patients.length} pacientes cargados desde Drive.`);
-      } else {
-        throw new Error('El archivo de Drive no contiene pacientes válidos.');
-      }
-    } catch (e: any) {
-      console.error('Error al descargar de Drive:', e);
-      setErrorMsg(e.message || 'Error al cargar desde Google Drive.');
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -406,14 +457,14 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold text-white">
-                  Sincronización Hospitalaria y Modo Fuera de Línea
+                  Google Drive Institucional (Fuente Única de Verdad)
                 </h2>
                 <span className="bg-teal-950 text-teal-300 border border-teal-800 text-[10px] px-2 py-0.5 rounded-full font-mono">
-                  Smart Merge
+                  En Tiempo Real
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Trabaja sin conexión cuando caiga el internet y unifica los ingresos de todas las computadoras al reconectar.
+                Cada cuenta de Google Drive mantiene su propio censo aislado. Todo cambio o baja se guarda directamente en Drive.
               </p>
             </div>
           </div>
@@ -442,21 +493,17 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
               )}
               <div>
                 <span className="font-bold text-xs block">
-                  {isOnline ? 'Conexión a Red Hospitalaria Activa' : 'Modo Fuera de Línea (Sin Internet)'}
+                  {isOnline
+                    ? 'Sincronización Simultánea en Línea Activa'
+                    : 'Modo Fuera de Línea (Sin Internet)'}
                 </span>
                 <span className="text-[11px] opacity-90">
                   {isOnline
-                    ? 'Listo para fusionar y actualizar el censo con Google Drive.'
-                    : 'Puedes seguir ingresando pacientes y notas; tus cambios se guardan localmente y se fusionarán al volver la red.'}
+                    ? 'Cualquier paciente ingresado, editado o eliminado se actualiza automáticamente en Google Drive.'
+                    : 'Tus cambios se guardan localmente y se subirán a Google Drive al recuperar la conexión.'}
                 </span>
               </div>
             </div>
-
-            {pendingMutations.length > 0 && (
-              <span className="bg-amber-200 dark:bg-amber-900 text-amber-900 dark:text-amber-200 px-2 py-0.5 rounded-md font-bold text-[10.5px] shrink-0">
-                {pendingMutations.length} cambios pendientes
-              </span>
-            )}
           </div>
 
           {/* Connection Card */}
@@ -467,11 +514,11 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
               </div>
               <div className="max-w-md mx-auto space-y-1">
                 <h3 className="font-bold text-slate-900 dark:text-white text-sm">
-                  Conectar con Google Drive
+                  Iniciar Sesión en Google Drive Institucional
                 </h3>
                 <p className="text-slate-500 text-xs">
-                  Inicia sesión una vez para activar la sincronización y fusión automática del archivo{' '}
-                  <code className="text-teal-600 dark:text-teal-400 font-semibold">ResiMed-Censo-MI.json</code>.
+                  Conecta la cuenta de Google Drive de tu hospital o servicio para cargar y editar su censo exclusivo (
+                  <code className="text-teal-600 dark:text-teal-400 font-semibold">ResiMed-Censo-MI.json</code>).
                 </p>
               </div>
 
@@ -479,7 +526,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                 <button
                   onClick={handleLogin}
                   disabled={isLoading || !isOnline}
-                  className="flex items-center gap-3 px-6 py-2.5 bg-white text-slate-700 hover:bg-slate-50 border border-slate-300 rounded-xl font-semibold text-xs shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99] disabled:opacity-50 cursor-pointer"
+                  className="flex items-center gap-3 px-6 py-2.5 bg-white text-slate-700 hover:bg-slate-50 border border-slate-300 rounded-xl font-semibold text-xs shadow-xs transition-all cursor-pointer disabled:opacity-50"
                 >
                   <svg className="w-4 h-4" viewBox="0 0 48 48">
                     <path
@@ -499,26 +546,28 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                       d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
                     />
                   </svg>
-                  <span>{isLoading ? 'Conectando...' : 'Iniciar sesión con Google'}</span>
+                  <span>{isLoading ? 'Conectando...' : 'Iniciar sesión con Google Drive'}</span>
                 </button>
               </div>
             </div>
           ) : (
             <div className="space-y-4">
               {/* Account Card */}
-              <div className="p-3.5 bg-teal-50/50 dark:bg-teal-950/20 rounded-2xl border border-teal-200 dark:border-teal-900/60 flex items-center justify-between gap-3">
+              <div className="p-3.5 bg-teal-50/50 dark:bg-teal-950/20 rounded-2xl border border-teal-200 dark:border-teal-900/60 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="w-9 h-9 rounded-full bg-teal-600 text-white font-bold flex items-center justify-center text-xs">
-                    {currentUser?.displayName?.[0] || currentUser?.email?.[0] || 'G'}
+                    {savedUser?.displayName?.[0] || savedUser?.email?.[0] || 'G'}
                   </div>
                   <div>
                     <div className="flex items-center gap-1.5">
                       <span className="font-bold text-slate-900 dark:text-white">
-                        {currentUser?.displayName || 'Usuario Google'}
+                        {savedUser?.displayName || 'Cuenta Institucional Google Drive'}
                       </span>
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-600" />
                     </div>
-                    <span className="text-slate-500 text-[11px]">{currentUser?.email}</span>
+                    <span className="text-slate-500 text-[11px] font-mono">
+                      {savedUser?.email}
+                    </span>
                   </div>
                 </div>
 
@@ -527,21 +576,22 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                     onClick={() => accessToken && fetchDriveFileInfo(accessToken)}
                     disabled={isLoading || !isOnline}
                     className="p-1.5 text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer"
-                    title="Actualizar estado de Drive"
+                    title="Verificar estado en Google Drive"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-teal-500' : ''}`} />
                   </button>
                   <button
                     onClick={handleLogout}
                     className="flex items-center gap-1 px-2.5 py-1 text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 rounded-lg border border-rose-200 dark:border-rose-900/40 transition-colors font-semibold text-[11px] cursor-pointer"
+                    title="Cerrar sesión para cambiar a la cuenta de otra institución"
                   >
                     <LogOut className="w-3 h-3" />
-                    <span>Desconectar</span>
+                    <span>Cambiar Cuenta / Salir</span>
                   </button>
                 </div>
               </div>
 
-              {/* Primary Action Card: SMART BIDIRECTIONAL MERGE */}
+              {/* Primary Action Card: AUTHORITATIVE REAL-TIME DRIVE SYNC */}
               <div className="p-4 bg-gradient-to-br from-teal-50 to-emerald-50 dark:from-teal-950/30 dark:to-emerald-950/20 rounded-2xl border-2 border-teal-500/40 space-y-3 shadow-xs">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
@@ -550,14 +600,19 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                         <GitMerge className="w-4 h-4" />
                       </span>
                       <h3 className="font-extrabold text-slate-900 dark:text-white text-xs">
-                        Fusión Inteligente Bidireccional (Smart Merge)
+                        Sincronización Directa en Tiempo Real con Google Drive
                       </h3>
                       <span className="bg-emerald-100 text-emerald-800 text-[9.5px] px-1.5 py-0.2 rounded font-black">
-                        CERO PÉRDIDA DE DATOS
+                        AUTO-SYNC ACTIVO
                       </span>
+                      {pendingMutations.length > 0 && (
+                        <span className="bg-amber-100 text-amber-800 text-[9.5px] px-1.5 py-0.2 rounded font-black">
+                          {pendingMutations.length} CAMBIO(S) FUERA DE LÍNEA PENDIENTE(S)
+                        </span>
+                      )}
                     </div>
                     <p className="text-slate-600 dark:text-slate-300 text-[11px] leading-relaxed">
-                      Si tú o tus compañeros trabajaron sin internet o en computadoras distintas, esta opción une todos los ingresos y cambios en un censo único sin sobrescribir el trabajo de nadie.
+                      Tu censo vive directamente en Google Drive. Cuando borras, ingresas o editas un paciente en línea, se guarda de inmediato en Drive y las demás computadoras conectadas a esta cuenta actualizan su pantalla automáticamente cada 4 segundos.
                     </p>
                   </div>
                 </div>
@@ -567,78 +622,56 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                     {lastSyncStr ? (
                       <span className="flex items-center gap-1 text-slate-600 dark:text-slate-400">
                         <History className="w-3.5 h-3.5 text-teal-600" />
-                        Última sincronización:{' '}
+                        Última actualización con Drive:{' '}
                         <strong className="font-mono">
-                          {new Date(lastSyncStr).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })} hrs
+                          {new Date(lastSyncStr).toLocaleTimeString('es-MX', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                          })}{' '}
+                          hrs
                         </strong>
                       </span>
                     ) : (
-                      <span>Pendiente de primera sincronización</span>
+                      <span>Sincronización continua activa</span>
                     )}
                   </div>
 
-                  <button
-                    onClick={requestSmartMerge}
-                    disabled={isLoading || !isOnline}
-                    className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white rounded-xl font-bold shadow-md shadow-teal-600/25 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 cursor-pointer"
-                  >
-                    <ArrowRightLeft className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-                    <span>Sincronizar y Fusionar Censo</span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={executeAuthoritativeSyncWithDrive}
+                      disabled={isLoading || !isOnline}
+                      className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white rounded-xl font-bold shadow-md shadow-teal-600/25 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      <ArrowRightLeft className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                      <span>Actualizar desde Drive Ahora</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
               {/* Last Sync Stats Report */}
               {lastSyncResult && (
-                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800 space-y-1.5 animate-in fade-in">
+                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800 space-y-1.5">
                   <div className="flex items-center gap-1.5 text-emerald-800 dark:text-emerald-300 font-bold text-xs">
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>Resultado de la última fusión de datos:</span>
+                    <span>Estado actual del censo en Google Drive:</span>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10.5px] text-slate-700 dark:text-slate-300">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[10.5px] text-slate-700 dark:text-slate-300">
                     <div className="bg-white dark:bg-slate-800 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-                      <span className="text-slate-400 block text-[9.5px]">Pacientes Totales</span>
+                      <span className="text-slate-400 block text-[9.5px]">Pacientes en Drive</span>
                       <strong className="text-teal-600 font-bold text-xs">{lastSyncResult.totalPatients}</strong>
                     </div>
                     <div className="bg-white dark:bg-slate-800 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-                      <span className="text-slate-400 block text-[9.5px]">Nuevos de Otras PC</span>
-                      <strong className="text-emerald-600 font-bold text-xs">+{lastSyncResult.addedRemotePatients}</strong>
-                    </div>
-                    <div className="bg-white dark:bg-slate-800 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-                      <span className="text-slate-400 block text-[9.5px]">Pacientes Actualizados</span>
-                      <strong className="text-indigo-600 font-bold text-xs">{lastSyncResult.updatedPatients}</strong>
-                    </div>
-                    <div className="bg-white dark:bg-slate-800 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-                      <span className="text-slate-400 block text-[9.5px]">Notas Preservadas</span>
+                      <span className="text-slate-400 block text-[9.5px]">Notas Archivadas</span>
                       <strong className="text-purple-600 font-bold text-xs">{lastSyncResult.totalNotes}</strong>
                     </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Pending Offline Changes List (if any) */}
-              {pendingMutations.length > 0 && (
-                <div className="p-3 bg-slate-50 dark:bg-slate-850 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5">
-                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 dark:text-slate-300">
-                    <span>Cambios realizados pendientes de consolidar ({pendingMutations.length}):</span>
-                    <span className="text-[10px] text-amber-600 dark:text-amber-400 font-normal">
-                      Se unirán al presionar Fusionar
-                    </span>
-                  </div>
-                  <div className="max-h-24 overflow-y-auto space-y-1 text-[10px] text-slate-600 dark:text-slate-400">
-                    {pendingMutations.slice(0, 5).map((m) => (
-                      <div key={m.id} className="flex items-center justify-between bg-white dark:bg-slate-900 p-1.5 rounded border border-slate-200 dark:border-slate-800">
-                        <span>• {m.description}</span>
-                        <span className="text-slate-400 text-[9px] font-mono">
-                          {new Date(m.timestamp).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                      </div>
-                    ))}
-                    {pendingMutations.length > 5 && (
-                      <div className="text-slate-400 italic text-center text-[9.5px]">
-                        y {pendingMutations.length - 5} cambios más...
-                      </div>
-                    )}
+                    <div className="bg-white dark:bg-slate-800 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
+                      <span className="text-slate-400 block text-[9.5px]">Archivo en Nube</span>
+                      <strong className="text-emerald-600 font-bold text-xs">
+                        {driveFileInfo ? 'ResiMed-Censo-MI.json' : 'Sincronizado'}
+                      </strong>
+                    </div>
                   </div>
                 </div>
               )}
@@ -650,14 +683,16 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                   onClick={() => setShowAdvanced(!showAdvanced)}
                   className="text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 text-[11px] underline cursor-pointer"
                 >
-                  {showAdvanced ? 'Ocultar opciones avanzadas' : 'Ver opciones de respaldo manual / forzado'}
+                  {showAdvanced
+                    ? 'Ocultar opciones avanzadas de control de Drive'
+                    : 'Ver opciones avanzadas (Sobrescribir Drive o Vaciar Censo en 0 pacientes)'}
                 </button>
               </div>
 
               {showAdvanced && (
-                <div className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl space-y-2 border border-slate-200 dark:border-slate-700">
+                <div className="p-3.5 bg-slate-100 dark:bg-slate-800 rounded-xl space-y-2.5 border border-slate-200 dark:border-slate-700">
                   <span className="font-bold text-[11px] text-slate-700 dark:text-slate-300 block">
-                    Opciones de Emergencia (Sobrescritura):
+                    Control Autoritativo sobre Google Drive:
                   </span>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -665,28 +700,31 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                         setConfirmDialog({
                           isOpen: true,
                           type: 'upload',
-                          title: '¿Forzar sobrescritura en Google Drive?',
+                          title: '¿Guardar esta pantalla como única versión en Google Drive?',
                           description:
-                            '¡Advertencia! Esto reemplazará el archivo en la nube con los datos de esta computadora. Usa Smart Merge preferentemente.',
+                            'Esto reemplazará el archivo de Google Drive exactamente con los pacientes que ves ahora en esta pantalla.',
                         })
                       }
-                      className="px-3 py-1.5 bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-[10.5px] font-semibold hover:bg-slate-300 cursor-pointer"
+                      className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-[10.5px] font-bold flex items-center gap-1.5 cursor-pointer"
                     >
-                      Forzar Subida Completa
+                      <CloudUpload className="w-3.5 h-3.5" />
+                      <span>Forzar Subida de Esta Pantalla a Drive</span>
                     </button>
+
                     <button
                       onClick={() =>
                         setConfirmDialog({
                           isOpen: true,
-                          type: 'download',
-                          title: '¿Forzar descarga completa desde Google Drive?',
+                          type: 'clear_all',
+                          title: '¿Vaciar todos los pacientes del censo en Google Drive?',
                           description:
-                            '¡Advertencia! Esto reemplazará los datos de esta computadora con la versión de Google Drive. Usa Smart Merge preferentemente.',
+                            'Esto eliminará todos los pacientes actuales (incluyendo cualquier paciente de prueba previo) y dejará el censo de esta cuenta de Google Drive completamente limpio en 0 pacientes para todas las computadoras.',
                         })
                       }
-                      className="px-3 py-1.5 bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-[10.5px] font-semibold hover:bg-slate-300 cursor-pointer"
+                      className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[10.5px] font-bold flex items-center gap-1.5 cursor-pointer"
                     >
-                      Forzar Descarga Completa
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Vaciar Censo en Drive (Dejar en 0 pacientes)</span>
                     </button>
                   </div>
                 </div>
@@ -704,14 +742,11 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
               {isUnauthorizedDomainError && (
                 <div className="p-3 bg-white dark:bg-slate-900 rounded-xl border border-rose-200 dark:border-rose-800/80 text-slate-700 dark:text-slate-300 space-y-2 text-[11px]">
                   <p className="font-bold text-slate-900 dark:text-white">
-                    ¿Por qué aparece <code>auth/unauthorized-domain</code> al exportar desde GitHub?
-                  </p>
-                  <p className="leading-relaxed">
-                    Por seguridad, Firebase bloquea el inicio de sesión de Google en dominios nuevos hasta que agregues el dominio a la lista blanca de tu proyecto. Se resuelve en <strong>30 segundos</strong>:
+                    ¿Por qué aparece <code>auth/unauthorized-domain</code>?
                   </p>
                   <ol className="list-decimal list-inside space-y-1 text-[11px]">
                     <li>
-                      Copia este dominio exacto donde estás abriendo la app:
+                      Copia este dominio exacto:
                       <div className="mt-1 flex items-center gap-2">
                         <code className="px-2.5 py-1 bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg font-mono font-bold text-teal-700 dark:text-teal-300">
                           {currentDomain}
@@ -749,12 +784,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                       >
                         Firebase Console → Authentication → Settings → Dominios autorizados
                       </a>{' '}
-                      (Proyecto: <code>{firebaseProjectId}</code>).
-                    </li>
-                    <li>
-                      Haz clic en <strong>"Agregar dominio" (Add domain)</strong>, pega{' '}
-                      <code>{currentDomain}</code> (y si usas Capacitor móvil agrega también{' '}
-                      <code>localhost</code>) y guarda.
+                      y agrégalo.
                     </li>
                   </ol>
                 </div>
@@ -762,17 +792,17 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
             </div>
           )}
 
-          {/* Universal Smart Merge by File (Works anywhere without OAuth / Domain Whitelisting) */}
+          {/* Universal Smart Merge by File */}
           <div className="p-4 bg-slate-50 dark:bg-slate-850 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-2.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <FileJson className="w-4 h-4 text-teal-600 dark:text-teal-400 shrink-0" />
                 <div>
                   <h4 className="font-bold text-slate-900 dark:text-white text-xs">
-                    Fusión Inteligente Directa por Archivo (Sin requerir Login ni Dominio Autorizado)
+                    Respaldo / Sincronización Directa por Archivo (.JSON)
                   </h4>
                   <p className="text-[10.5px] text-slate-500">
-                    Funciona en cualquier servidor, GitHub, Android/iOS, carpeta de Google Drive de escritorio, WhatsApp o AirDrop usando el mismo motor Smart Merge sin perder ningún ingreso.
+                    También puedes descargar o cargar el archivo <code>ResiMed-Censo-MI.json</code> manualmente.
                   </p>
                 </div>
               </div>
@@ -784,7 +814,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-xl font-bold text-[11px] cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5 text-teal-600" />
-                <span>1. Exportar Mi Censo (ResiMed-Censo-MI.json)</span>
+                <span>Exportar Censo (ResiMed-Censo-MI.json)</span>
               </button>
               <input
                 ref={fileMergeInputRef}
@@ -800,7 +830,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                 className="flex items-center gap-1.5 px-3.5 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-bold text-[11px] shadow-xs cursor-pointer"
               >
                 <Upload className="w-3.5 h-3.5" />
-                <span>2. Fusionar con Archivo .json de Compañero / Drive (Smart Merge)</span>
+                <span>Cargar / Fusionar Archivo .json</span>
               </button>
             </div>
           </div>
@@ -813,7 +843,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
         {/* Footer */}
         <div className="bg-slate-50 dark:bg-slate-850 p-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
           <span className="text-[11px] text-slate-400">
-            Protocolo de reconciliación determinista ResiMed Sync v1.1.
+            Sincronización Institucional Basada en Google Drive v2.0
           </span>
           <button
             onClick={onClose}
@@ -830,10 +860,10 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4">
             <div className="flex items-center gap-3 text-slate-900 dark:text-white">
               <div className="p-2.5 rounded-xl bg-teal-500/20 text-teal-400">
-                {confirmDialog.type === 'merge' ? (
-                  <GitMerge className="w-5 h-5" />
-                ) : confirmDialog.type === 'upload' ? (
+                {confirmDialog.type === 'upload' ? (
                   <CloudUpload className="w-5 h-5" />
+                ) : confirmDialog.type === 'clear_all' ? (
+                  <Trash2 className="w-5 h-5 text-rose-500" />
                 ) : (
                   <CloudDownload className="w-5 h-5" />
                 )}
@@ -854,13 +884,17 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
               </button>
               <button
                 onClick={
-                  confirmDialog.type === 'merge'
-                    ? executeSmartMerge
-                    : confirmDialog.type === 'upload'
+                  confirmDialog.type === 'upload'
                     ? executeUploadToDrive
-                    : executeDownloadFromDrive
+                    : confirmDialog.type === 'clear_all'
+                    ? executeClearAllPatientsInDrive
+                    : executeAuthoritativeSyncWithDrive
                 }
-                className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold rounded-xl shadow-md transition-colors cursor-pointer"
+                className={`px-4 py-2 text-white text-xs font-bold rounded-xl shadow-md transition-colors cursor-pointer ${
+                  confirmDialog.type === 'clear_all'
+                    ? 'bg-rose-600 hover:bg-rose-700'
+                    : 'bg-teal-600 hover:bg-teal-700'
+                }`}
               >
                 Confirmar y Proceder
               </button>

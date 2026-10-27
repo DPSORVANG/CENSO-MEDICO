@@ -216,4 +216,81 @@ describe('ResiMed MI Offline / Online Smart Merge Engine', () => {
     assert.ok(merged.notes.some((n) => n.id === 'note_1'));
     assert.ok(merged.notes.some((n) => n.id === 'note_2'));
   });
+
+  it('honors deletion tombstones (deletedPatientIds) so deleted patients never resurrect from other computers', () => {
+    const keptPatient: Patient = {
+      id: 'pat_keep_1',
+      recordNumber: 'EXP-901',
+      name: 'Méndez Soto Carlos',
+      age: 58,
+      gender: 'Masculino',
+      bed: 'Cama 305',
+      service: 'Medicina Interna Piso 3',
+      admissionDate: '2026-10-20',
+      status: 'active',
+      severity: 'Estable',
+      codeStatus: 'RCP 1 (Reanimación Completa / Todo esfuerzo)',
+      allergies: 'Negadas',
+      diagnoses: ['1. Infección de vías urinarias'],
+      vitals: { bp: '120/75', hr: '72', rr: '16', temp: '36.6', spo2: '97' },
+      medications: [],
+      labs: [],
+      pendings: [],
+      lastUpdated: '2026-10-25T10:00:00.000Z',
+    };
+
+    const deletedPatientStillOnOtherPC: Patient = {
+      id: 'pat_deleted_2',
+      recordNumber: 'EXP-902',
+      name: 'Paciente Eliminado en PC 1',
+      age: 64,
+      gender: 'Femenino',
+      bed: 'Cama 306',
+      service: 'Medicina Interna Piso 3',
+      admissionDate: '2026-10-19',
+      status: 'active',
+      severity: 'Estable',
+      codeStatus: 'RCP 1 (Reanimación Completa / Todo esfuerzo)',
+      allergies: 'Negadas',
+      diagnoses: ['1. Alta / Registro eliminado'],
+      vitals: { bp: '120/80', hr: '75', rr: '18', temp: '36.5', spo2: '96' },
+      medications: [],
+      labs: [],
+      pendings: [],
+      lastUpdated: '2026-10-25T09:00:00.000Z',
+    };
+
+    // PC 1 deleted pat_deleted_2 at 12:00:00Z, so PC 1 only has keptPatient and a tombstone for pat_deleted_2
+    const pc1Package: BackupPackage = {
+      version: '1.1.0',
+      exportDate: '2026-10-25T12:05:00.000Z',
+      residentAuthor: 'PC 1',
+      patients: [keptPatient],
+      notes: [],
+      deletedPatientIds: {
+        pat_deleted_2: '2026-10-25T12:00:00.000Z',
+        'rec:exp-902': '2026-10-25T12:00:00.000Z',
+      },
+      integrityHash: 'h_pc1',
+    };
+
+    // PC 2 (or Drive) still had both keptPatient and deletedPatientStillOnOtherPC
+    const pc2Package: BackupPackage = {
+      version: '1.1.0',
+      exportDate: '2026-10-25T11:30:00.000Z',
+      residentAuthor: 'PC 2',
+      patients: [keptPatient, deletedPatientStillOnOtherPC],
+      notes: [],
+      integrityHash: 'h_pc2',
+    };
+
+    const { merged, stats } = mergeCensusData(pc1Package, pc2Package);
+
+    // pat_deleted_2 MUST NOT be resurrected!
+    assert.equal(merged.patients.length, 1);
+    assert.equal(merged.patients[0].id, 'pat_keep_1');
+    assert.ok(!merged.patients.some((p) => p.id === 'pat_deleted_2'));
+    assert.equal(stats.deletedPatientsCount, 1);
+    assert.equal(merged.deletedPatientIds?.['pat_deleted_2'], '2026-10-25T12:00:00.000Z');
+  });
 });

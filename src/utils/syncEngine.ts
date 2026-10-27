@@ -1,11 +1,17 @@
 import type { Patient, ClinicalNoteRecord, LabRecord, DiagnosticStudy, ClinicalPending, MedicationItem } from '../types/clinical.ts';
-import type { BackupPackage } from './storage.ts';
+import {
+  type BackupPackage,
+  loadDeletedPatients,
+  saveDeletedPatients,
+  isPatientDeletedByTombstone,
+} from './storage.ts';
 import { generateAuditHash } from './clinicalLogic.ts';
 
 export interface MergeStats {
   addedRemotePatients: number;
   addedLocalPatients: number;
   updatedPatients: number;
+  deletedPatientsCount?: number;
   addedNotes: number;
   totalPatients: number;
   totalNotes: number;
@@ -277,9 +283,30 @@ export function mergeSinglePatient(patientA: Patient, patientB: Patient): Patien
 }
 
 /**
+ * Merges deletion tombstone maps keeping the newest deletion timestamp per key
+ */
+export function mergeTombstones(
+  ...maps: Array<Record<string, string> | undefined>
+): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const m of maps) {
+    if (!m || typeof m !== 'object') continue;
+    for (const [key, ts] of Object.entries(m)) {
+      if (!ts) continue;
+      const existing = merged[key];
+      if (!existing || new Date(ts).getTime() > new Date(existing).getTime()) {
+        merged[key] = ts;
+      }
+    }
+  }
+  return merged;
+}
+
+/**
  * Core Bidirectional Census Reconciliation Engine:
  * Smartly merges Local (offline) data with Remote (Google Drive) data.
- * - Distinct patients added on either side are all included (zero patients lost).
+ * - Honors deletion tombstones (deletedPatientIds) from any workstation so deleted patients never reappear.
+ * - Distinct active patients added on either side are all included (zero patients lost).
  * - Shared patients are reconciled with merged labs, studies, medications, tags, and diagnoses.
  * - Historical clinical notes are unioned by audit hash / ID (zero notes lost).
  */
@@ -288,8 +315,34 @@ export function mergeCensusData(
   remoteData: BackupPackage,
   residentAuthor: string = 'Residente Medicina Interna'
 ): { merged: BackupPackage; stats: MergeStats } {
-  const localPatients = localData.patients || [];
-  const remotePatients = remoteData.patients || [];
+  const storedTombstones =
+    typeof localStorage !== 'undefined' ? loadDeletedPatients() : {};
+  const mergedDeletedPatientIds = mergeTombstones(
+    storedTombstones,
+    localData.deletedPatientIds,
+    remoteData.deletedPatientIds
+  );
+
+  if (typeof localStorage !== 'undefined' && Object.keys(mergedDeletedPatientIds).length > 0) {
+    saveDeletedPatients(mergedDeletedPatientIds);
+  }
+
+  let deletedPatientsCount = 0;
+
+  const rawLocalPatients = localData.patients || [];
+  const rawRemotePatients = remoteData.patients || [];
+
+  const localPatients = rawLocalPatients.filter((p) => {
+    const isDel = isPatientDeletedByTombstone(p, mergedDeletedPatientIds);
+    if (isDel) deletedPatientsCount++;
+    return !isDel;
+  });
+
+  const remotePatients = rawRemotePatients.filter((p) => {
+    const isDel = isPatientDeletedByTombstone(p, mergedDeletedPatientIds);
+    if (isDel) deletedPatientsCount++;
+    return !isDel;
+  });
 
   const localNotes = localData.notes || [];
   const remoteNotes = remoteData.notes || [];
@@ -367,6 +420,7 @@ export function mergeCensusData(
     residentAuthor,
     patients: mergedPatients,
     notes: mergedNotes,
+    deletedPatientIds: mergedDeletedPatientIds,
     integrityHash: generateAuditHash('CENSUS-SMART-MERGE', now, `${mergedPatients.length}:${mergedNotes.length}`),
   };
 
@@ -374,6 +428,7 @@ export function mergeCensusData(
     addedRemotePatients,
     addedLocalPatients,
     updatedPatients,
+    deletedPatientsCount,
     addedNotes,
     totalPatients: mergedPatients.length,
     totalNotes: mergedNotes.length,
