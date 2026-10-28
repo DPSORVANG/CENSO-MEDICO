@@ -312,14 +312,14 @@ export const DriveLoginGateScreen: React.FC<DriveLoginGateScreenProps> = ({
               <button
                 type="button"
                 onClick={handleStartDemo}
-                className="p-3 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700 text-left space-y-1 transition-colors cursor-pointer"
+                className="p-3 rounded-xl bg-purple-950/40 hover:bg-purple-900/50 border border-purple-500/40 text-left space-y-1 transition-colors cursor-pointer"
               >
-                <div className="flex items-center gap-1.5 font-bold text-xs text-white">
+                <div className="flex items-center gap-1.5 font-bold text-xs text-purple-200">
                   <FlaskConical className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Modo Demostración</span>
+                  <span>Prueba de Estrés (100 Pacientes)</span>
                 </div>
-                <p className="text-[10.5px] text-slate-400 leading-snug">
-                  Explora las funciones con 3 pacientes de prueba aislados.
+                <p className="text-[10.5px] text-purple-300/80 leading-snug">
+                  Carga 100 pacientes clínicos completos con labs, estudios, antibióticos y notas.
                 </p>
               </button>
             </div>

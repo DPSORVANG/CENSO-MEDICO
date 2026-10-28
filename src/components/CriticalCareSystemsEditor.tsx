@@ -6,19 +6,24 @@ import {
   Utensils,
   Droplets,
   Bug,
-  Sparkles,
+  Wand2,
   ChevronDown,
   ChevronUp,
-  RotateCcw,
+  Check,
+  Pencil,
 } from 'lucide-react';
 import { CriticalCareSystemsData, Patient } from '../types/clinical.ts';
-import { calculateAntibioticDay } from '../utils/clinicalLogic.ts';
+import {
+  calculateAntibioticDay,
+  formatCriticalCareSystemsSummary,
+} from '../utils/clinicalLogic.ts';
 import { InfoPopover } from './InfoPopover.tsx';
 
 interface CriticalCareSystemsEditorProps {
   value: CriticalCareSystemsData;
   onChange: (updated: CriticalCareSystemsData) => void;
   patient?: Patient;
+  onCloseEditor?: () => void;
 }
 
 type SystemTabKey =
@@ -29,16 +34,40 @@ type SystemTabKey =
   | 'renal'
   | 'infectious';
 
+// Crisp Broom (Escoba) SVG icon for mobile/tablet ergonomics
+const BroomIcon: React.FC<{ className?: string }> = ({ className = 'w-3.5 h-3.5' }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="m13 11 9-9" />
+    <path d="M14.6 12.6c.8.8.9 2.1.2 3L10 22l-8-8 6.4-4.8c.9-.7 2.2-.6 3 .2Z" />
+    <path d="m6.8 10.4 6.8 6.8" />
+    <path d="m5 17 1.5-1.5" />
+    <path d="m8 20 1.5-1.5" />
+  </svg>
+);
+
 export const CriticalCareSystemsEditor: React.FC<CriticalCareSystemsEditorProps> = ({
   value,
   onChange,
   patient,
+  onCloseEditor,
 }) => {
   const [activeTab, setActiveTab] = useState<SystemTabKey>('neuro');
-  const [isExpanded, setIsExpanded] = useState<boolean>(Boolean(value?.enabled));
+  const [isExpanded, setIsExpanded] = useState<boolean>(
+    Boolean(onCloseEditor) || Boolean(value?.enabled)
+  );
+  const [autoFillFeedback, setAutoFillFeedback] = useState<boolean>(false);
 
   const data: CriticalCareSystemsData = {
-    enabled: value?.enabled ?? false,
+    enabled: Boolean(onCloseEditor) || (value?.enabled ?? false),
     neuro: value?.neuro || {},
     respiratory: value?.respiratory || {},
     hemodynamic: value?.hemodynamic || {},
@@ -76,7 +105,7 @@ export const CriticalCareSystemsEditor: React.FC<CriticalCareSystemsEditorProps>
     updateSystemField(system, field, next);
   };
 
-  // Auto-populate relevant values from patient's latest vitals, labs, and active antibiotics
+  // Synchronize / Auto-populate relevant values from patient's latest vitals, labs, and active antibiotics
   const handleAutoFillFromPatient = () => {
     if (!patient) return;
     const latestLab = patient.labs && patient.labs.length > 0 ? patient.labs[0] : null;
@@ -133,39 +162,50 @@ export const CriticalCareSystemsEditor: React.FC<CriticalCareSystemsEditorProps>
       enabled: true,
       respiratory: {
         ...data.respiratory,
-        spo2: data.respiratory?.spo2 || (patient.vitals?.spo2 ? `${patient.vitals.spo2}%` : ''),
-        respRateVent: data.respiratory?.respRateVent || (patient.vitals?.rr ? `${patient.vitals.rr} rpm` : ''),
-        bloodGas: data.respiratory?.bloodGas || gasParts.join(', '),
+        spo2: patient.vitals?.spo2 ? `${patient.vitals.spo2}%` : data.respiratory?.spo2 || '',
+        respRateVent: patient.vitals?.rr ? `${patient.vitals.rr} rpm` : data.respiratory?.respRateVent || '',
+        bloodGas: gasParts.length > 0 ? gasParts.join(', ') : data.respiratory?.bloodGas || '',
       },
       hemodynamic: {
         ...data.hemodynamic,
-        bpAndMap: data.hemodynamic?.bpAndMap || bpAndMapStr,
+        bpAndMap: bpAndMapStr || data.hemodynamic?.bpAndMap || '',
         hrAndRhythm:
-          data.hemodynamic?.hrAndRhythm ||
-          (patient.vitals?.hr ? `${patient.vitals.hr} lpm · Sinusal` : ''),
+          patient.vitals?.hr
+            ? `${patient.vitals.hr} lpm · Sinusal`
+            : data.hemodynamic?.hrAndRhythm || '',
       },
       gastroMetabolic: {
         ...data.gastroMetabolic,
         glycemias:
-          data.gastroMetabolic?.glycemias ||
-          (patient.vitals?.glucose
+          patient.vitals?.glucose
             ? `${patient.vitals.glucose} mg/dL`
             : latestLab?.glucosa !== undefined
             ? `${latestLab.glucosa} mg/dL`
-            : ''),
-        feedingType: data.gastroMetabolic?.feedingType || patient.diet || '',
+            : data.gastroMetabolic?.glycemias || '',
+        feedingType: patient.diet || data.gastroMetabolic?.feedingType || '',
       },
       renal: {
         ...data.renal,
-        renalFunction: data.renal?.renalFunction || renalParts.join(', '),
+        renalFunction: renalParts.length > 0 ? renalParts.join(', ') : data.renal?.renalFunction || '',
       },
       infectious: {
         ...data.infectious,
-        acutePhaseReactants: data.infectious?.acutePhaseReactants || reactParts.join(', '),
-        antibioticsInUse: data.infectious?.antibioticsInUse || activeAtb,
+        acutePhaseReactants:
+          reactParts.length > 0 ? reactParts.join(', ') : data.infectious?.acutePhaseReactants || '',
+        antibioticsInUse: activeAtb || data.infectious?.antibioticsInUse || '',
       },
     });
     setIsExpanded(true);
+    setAutoFillFeedback(true);
+    window.setTimeout(() => setAutoFillFeedback(false), 2600);
+  };
+
+  const handleSaveAndReturnToReadView = () => {
+    if (onCloseEditor) {
+      onCloseEditor();
+    } else {
+      setIsExpanded(false);
+    }
   };
 
   const systemTabs: Array<{
@@ -227,12 +267,13 @@ export const CriticalCareSystemsEditor: React.FC<CriticalCareSystemsEditorProps>
   ];
 
   const activeSystemsCount = systemTabs.filter((t) => t.hasData).length;
+  const readSummaryItems = formatCriticalCareSystemsSummary(data);
 
   return (
     <div className="bg-slate-50 dark:bg-slate-850 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-      {/* Header Bar */}
-      <div className="px-3.5 py-2.5 bg-slate-100/90 dark:bg-slate-900 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+      {/* Compact Icon-First Header Bar */}
+      <div className="px-3 py-2 bg-slate-100/90 dark:bg-slate-900 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
           <button
             type="button"
             onClick={() => {
@@ -242,41 +283,44 @@ export const CriticalCareSystemsEditor: React.FC<CriticalCareSystemsEditorProps>
                 onChange({ ...data, enabled: true });
               }
             }}
-            className="flex items-center gap-2 text-left cursor-pointer"
+            className="flex items-center gap-1.5 text-left cursor-pointer min-w-0"
           >
             <span className="w-2.5 h-2.5 rounded-full bg-teal-500 shrink-0" />
-            <span className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider">
-              Evolución y Parámetros por Sistemas (Opcional — Todos los Pacientes)
+            <span className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider truncate">
+              Evolución por Sistemas
             </span>
             {activeSystemsCount > 0 && (
-              <span className="px-2 py-0.5 rounded-full bg-teal-600 text-white font-mono font-bold text-[10px]">
-                {activeSystemsCount} con datos
+              <span className="px-1.5 py-0.5 rounded-full bg-teal-600 text-white font-mono font-bold text-[10px] shrink-0">
+                {activeSystemsCount}
               </span>
             )}
             {isExpanded ? (
-              <ChevronUp className="w-4 h-4 text-slate-500" />
+              <ChevronUp className="w-4 h-4 text-slate-500 shrink-0" />
             ) : (
-              <ChevronDown className="w-4 h-4 text-slate-500" />
+              <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
             )}
           </button>
           <InfoPopover
-            title="Evolución y Parámetros por Sistemas (Para cualquier paciente)"
-            content="Úsalo en cualquier paciente que requiera seguimiento de algún parámetro específico (ej. solo Uresis/Balance en Renal, solo Glasgow en Neurológico, o los 6 sistemas en paciente crítico). Únicamente los valores que llenes aparecerán en la Nota y en el Censo; los campos en blanco se omiten por completo."
+            title="Evolución por Sistemas"
+            content="Registra parámetros por aparato/sistema (Neurológico, Respiratorio, Hemodinámico, GI/Metabólico, Renal o Infeccioso). El botón de varita mágica (⚡ SV/Labs) jala automáticamente los signos vitales, PAM, gasometría, función renal y antibióticos actuales de la ficha del paciente. El botón de escoba limpia todos los sistemas."
           />
         </div>
 
-        <div className="flex items-center gap-1.5">
+        {/* Icon-First Action Toolbar for Mobile/Tablet/Desktop */}
+        <div className="flex items-center gap-1.5 shrink-0">
           {patient && (
             <button
               type="button"
               onClick={handleAutoFillFromPatient}
-              className="px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold text-[11px] flex items-center gap-1 shadow-2xs cursor-pointer"
-              title="Importar signos vitales, PAM, gasometría, función renal y antibióticos actuales del paciente"
+              className="px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold text-[11px] flex items-center gap-1 shadow-2xs transition-colors cursor-pointer"
+              title="Importar Signos Vitales, PAM, Gasometría, Función Renal y Antibióticos actuales del paciente a cada sistema"
+              aria-label="Importar signos vitales y laboratorios actuales del paciente"
             >
-              <Sparkles className="w-3 h-3" />
-              <span>Autocompletar desde Censo</span>
+              <Wand2 className="w-3.5 h-3.5 shrink-0" />
+              <span>SV/Labs</span>
             </button>
           )}
+
           {activeSystemsCount > 0 && (
             <button
               type="button"
@@ -291,32 +335,75 @@ export const CriticalCareSystemsEditor: React.FC<CriticalCareSystemsEditorProps>
                   infectious: {},
                 })
               }
-              className="px-2 py-1 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-100 dark:hover:bg-rose-950/50 text-slate-600 dark:text-slate-300 hover:text-rose-700 font-bold text-[10px] flex items-center gap-1 cursor-pointer"
-              title="Limpiar todos los parámetros por sistemas"
+              className="p-1.5 rounded-lg bg-slate-200/90 dark:bg-slate-800 hover:bg-rose-100 dark:hover:bg-rose-950/60 text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400 border border-slate-300/70 dark:border-slate-700 transition-colors flex items-center justify-center cursor-pointer"
+              title="Limpiar todos los parámetros por sistemas (Escoba)"
+              aria-label="Limpiar todos los parámetros por sistemas"
             >
-              <RotateCcw className="w-3 h-3" />
-              <span>Limpiar</span>
+              <BroomIcon className="w-3.5 h-3.5" />
             </button>
           )}
-          {(data.enabled || activeSystemsCount > 0) && (
-            <label className="flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300 cursor-pointer ml-1">
-              <input
-                type="checkbox"
-                checked={Boolean(data.enabled)}
-                onChange={(e) => onChange({ ...data, enabled: e.target.checked })}
-                className="rounded text-teal-600 focus:ring-teal-500"
-              />
-              <span>Incluir valores llenos en Nota y Censo</span>
-            </label>
+
+          {(isExpanded || onCloseEditor) && (
+            <button
+              type="button"
+              onClick={handleSaveAndReturnToReadView}
+              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center gap-1 shadow-2xs transition-colors cursor-pointer"
+              title="Guardar cambios y volver a la vista de lectura"
+              aria-label="Guardar y volver a vista de lectura"
+            >
+              <Check className="w-3.5 h-3.5 stroke-[2.5] shrink-0" />
+              <span className="hidden sm:inline">Listo</span>
+            </button>
           )}
         </div>
       </div>
 
+      {/* Confirmation Banner when SV/Labs are imported */}
+      {autoFillFeedback && (
+        <div className="px-3.5 py-1.5 bg-teal-600 text-white text-[11px] font-bold flex items-center gap-1.5">
+          <Check className="w-3.5 h-3.5 shrink-0" />
+          <span>
+            Se actualizaron Signos Vitales, PAM, Gasometría, Función Renal y Antibióticos desde la ficha del paciente.
+          </span>
+        </div>
+      )}
+
+      {/* Read-Only Summary View when collapsed inside Modals */}
+      {!isExpanded && readSummaryItems.length > 0 && (
+        <div
+          onClick={() => setIsExpanded(true)}
+          title="Clic para editar Evolución por Sistemas"
+          className="p-2.5 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 space-y-1.5 cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors"
+        >
+          <div className="flex items-center justify-between text-[11px] text-slate-400">
+            <span>Vista de lectura (toca para editar)</span>
+            <span className="inline-flex items-center gap-1 text-teal-600 dark:text-teal-400 font-bold">
+              <Pencil className="w-3 h-3" />
+              <span>Editar</span>
+            </span>
+          </div>
+          <div className="grid grid-cols-1 gap-1.5">
+            {readSummaryItems.map((sys) => (
+              <div
+                key={sys.key}
+                className="text-xs leading-snug flex items-baseline gap-1.5"
+              >
+                <span
+                  className={`text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded border shrink-0 ${sys.badgeClass}`}
+                >
+                  {sys.shortLabel}
+                </span>
+                <span className="text-slate-800 dark:text-slate-200 break-words">
+                  {sys.summary}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {isExpanded && (
         <div className="p-3.5 space-y-3 text-xs">
-          <p className="text-[11px] text-slate-500 dark:text-slate-400">
-            Llena únicamente los valores que ocupe tu paciente (ej. Uresis, Balance hídrico, Glasgow, Ventilador o Aminas). Todo campo que dejes vacío se omitirá automáticamente en la nota y en el censo.
-          </p>
           {/* 6 System Selector Tabs */}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5">
             {systemTabs.map((tab) => {
@@ -1087,6 +1174,27 @@ export const CriticalCareSystemsEditor: React.FC<CriticalCareSystemsEditorProps>
               </div>
             </div>
           )}
+
+          {/* Footer Action Bar to Save & Return to Read View without clicking another patient */}
+          <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-200 dark:border-slate-800">
+            <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={Boolean(data.enabled)}
+                onChange={(e) => onChange({ ...data, enabled: e.target.checked })}
+                className="rounded text-teal-600 focus:ring-teal-500"
+              />
+              <span>Mostrar en Censo y Nota</span>
+            </label>
+            <button
+              type="button"
+              onClick={handleSaveAndReturnToReadView}
+              className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+            >
+              <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+              <span>Guardar y Vista de Lectura</span>
+            </button>
+          </div>
         </div>
       )}
     </div>

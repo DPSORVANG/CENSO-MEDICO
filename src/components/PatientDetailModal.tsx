@@ -18,9 +18,10 @@ import {
   Calendar,
   LogOut,
   FlaskConical,
-  Tag,
+   Tag,
   Clock,
   Settings,
+  Layers,
 } from 'lucide-react';
 import {
   Patient,
@@ -41,8 +42,11 @@ import {
   getRespiratorySupportFlags,
   getNonRedundantClinicalTags,
   filterAndSortLabsOldestToNewest,
-  calculateLabNumericTrend,
   LabFilterMode,
+  COMPARATIVE_LAB_PANELS,
+  ComparativeLabPanelId,
+  ComparativeLabParameterRow,
+  buildPatientComparativeLabAnalysis,
   isChainedClinicalPending,
   advancePendingWorkflow,
   getPendingTrafficLightInfo,
@@ -90,8 +94,6 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
   onOpenSettings,
   patientNotes,
 }) => {
-  if (!isOpen) return null;
-
   const medicationRoutesList =
     profile?.medicationRoutesCatalog && profile.medicationRoutesCatalog.length > 0
       ? profile.medicationRoutesCatalog
@@ -113,6 +115,56 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
   // Lab comparative filter mode (Requested: Inicial + Último, Inicial + Últimos 3, Inicial + Últimos 4, Últimos 3, Últimos 4, Selección de Fechas)
   const [labFilterMode, setLabFilterMode] = useState<LabFilterMode>('initial-last3');
   const [customSelectedLabIds, setCustomSelectedLabIds] = useState<string[]>([]);
+  const [activeLabPanelFilter, setActiveLabPanelFilter] = useState<'all' | ComparativeLabPanelId>('all');
+
+  // Inline Pre-Note Signos Vitales capture inside Expediente
+  const [isEditingVitals, setIsEditingVitals] = useState(false);
+  const [vitalsDraft, setVitalsDraft] = useState({
+    bp: patient.vitals?.bp || '120/80',
+    hr: patient.vitals?.hr || '75',
+    rr: patient.vitals?.rr || '18',
+    temp: patient.vitals?.temp || '36.5',
+    spo2: patient.vitals?.spo2 || '96',
+    glucose: patient.vitals?.glucose || '',
+    weightKg: patient.vitals?.weightKg ? String(patient.vitals.weightKg) : '',
+  });
+
+  useEffect(() => {
+    setVitalsDraft({
+      bp: patient.vitals?.bp || '120/80',
+      hr: patient.vitals?.hr || '75',
+      rr: patient.vitals?.rr || '18',
+      temp: patient.vitals?.temp || '36.5',
+      spo2: patient.vitals?.spo2 || '96',
+      glucose: patient.vitals?.glucose || '',
+      weightKg: patient.vitals?.weightKg ? String(patient.vitals.weightKg) : '',
+    });
+  }, [patient.id, patient.vitals]);
+
+  const handleSavePreNoteVitals = (e: React.FormEvent) => {
+    e.preventDefault();
+    const nowTime = new Date().toLocaleTimeString('es-MX', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const parsedWeight = parseFloat(vitalsDraft.weightKg);
+    onUpdatePatient({
+      ...patient,
+      vitals: {
+        bp: vitalsDraft.bp.trim() || patient.vitals?.bp || '120/80',
+        hr: vitalsDraft.hr.trim() || patient.vitals?.hr || '75',
+        rr: vitalsDraft.rr.trim() || patient.vitals?.rr || '18',
+        temp: vitalsDraft.temp.trim() || patient.vitals?.temp || '36.5',
+        spo2: vitalsDraft.spo2.trim() || patient.vitals?.spo2 || '96',
+        glucose: vitalsDraft.glucose.trim() || undefined,
+        weightKg: !isNaN(parsedWeight) && parsedWeight > 0 ? parsedWeight : patient.vitals?.weightKg,
+        updatedAt: nowTime,
+        isNew: true,
+      },
+      lastUpdated: new Date().toISOString(),
+    });
+    setIsEditingVitals(false);
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -431,6 +483,8 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
     setTimeout(() => setCopiedNoteId(null), 2500);
   };
 
+  if (!isOpen) return null;
+
   // Filtered and chronologically ordered labs: OLDEST ON LEFT -> NEWEST ON RIGHT
   const comparativeLabs = filterAndSortLabsOldestToNewest(
     patient.labs,
@@ -438,24 +492,22 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
     customSelectedLabIds
   );
 
-  // Helper to render trend cell with arrow, color, and exact numeric delta between newest and previous lab
-  const renderNumericTrendCell = (
-    paramKey: 'leucos' | 'hb' | 'plaquetas' | 'creatinina' | 'glucosa' | 'na' | 'k'
-  ) => {
-    const validVals = comparativeLabs
-      .map((l) => l[paramKey])
-      .filter((v): v is number => v !== undefined && v !== null && !Number.isNaN(v));
-    if (validVals.length < 2) return <span className="text-slate-400">-</span>;
+  // Full multi-panel comparative analysis across all 8 Internal Medicine panel groups + extraParams
+  const comparativeAnalysis = buildPatientComparativeLabAnalysis(comparativeLabs);
+  const visiblePanels =
+    activeLabPanelFilter === 'all'
+      ? comparativeAnalysis.panelsWithData
+      : comparativeAnalysis.panelsWithData.filter((p) => p.id === activeLabPanelFilter);
 
-    const olderVal = validVals[validVals.length - 2];
-    const newerVal = validVals[validVals.length - 1];
-    const trend = calculateLabNumericTrend(paramKey, olderVal, newerVal);
+  // Helper to render trend cell with arrow, color, and exact numeric delta between newest and previous lab
+  const renderParameterTrendBadge = (row: ComparativeLabParameterRow) => {
+    const { trend, previousFormatted, latestFormatted } = row;
     if (!trend.hasTrend) return <span className="text-slate-400">-</span>;
 
     return (
       <span
-        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border font-mono font-bold text-[11px] ${trend.colorClass}`}
-        title={`Cambio numérico entre penúltimo (${olderVal}) y último estudio (${newerVal}): ${trend.formattedDiff}`}
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border font-mono font-bold text-[11px] whitespace-nowrap ${trend.colorClass}`}
+        title={`Comparativa entre penúltimo (${previousFormatted ?? '-'}) y último valor (${latestFormatted ?? '-'}): ${trend.formattedDiff}`}
       >
         {trend.direction === 'up' && <TrendingUp className="w-3.5 h-3.5 shrink-0" />}
         {trend.direction === 'down' && <TrendingDown className="w-3.5 h-3.5 shrink-0" />}
@@ -466,8 +518,8 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center pt-14 px-3 pb-3 sm:px-6 sm:pb-6 overflow-y-auto">
-      <div className="bg-white dark:bg-slate-900 w-full max-w-5xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col max-h-[88vh] overflow-hidden">
+    <div className="fixed inset-0 z-50 bg-slate-900/85 flex items-center justify-center pt-12 px-2 pb-2 sm:px-5 sm:pb-4 overflow-y-auto">
+      <div className="bg-white dark:bg-slate-900 w-full max-w-6xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col max-h-[90vh] overflow-hidden">
         {/* Header */}
         <div className="px-3.5 sm:px-6 py-3 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2.5 border-b border-slate-800 shrink-0">
           <div className="flex items-start sm:items-center gap-2.5 min-w-0 flex-1">
@@ -562,8 +614,157 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
           </div>
         </div>
 
+        {/* Barra de Signos Vitales Actuales (Con Captura Pre-Nota para el Pase de Visita) */}
+        <div className="px-3.5 sm:px-6 py-2 bg-slate-50 dark:bg-slate-900/90 border-b border-slate-200 dark:border-slate-800 shrink-0">
+          {isEditingVitals ? (
+            <form onSubmit={handleSavePreNoteVitals} className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-wider text-teal-700 dark:text-teal-300">
+                  <Activity className="w-3.5 h-3.5" />
+                  <span>Capturar Signos Vitales (Pre-Nota / Pase de Visita)</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingVitals(false)}
+                    className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-600 dark:text-slate-300 cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-3 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-extrabold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Guardar SV para la Nota</span>
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 sm:grid-cols-7 gap-2 text-xs">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 block">TA (mmHg)</span>
+                  <input
+                    type="text"
+                    value={vitalsDraft.bp}
+                    onChange={(e) => setVitalsDraft((p) => ({ ...p, bp: e.target.value }))}
+                    autoFocus
+                    className="w-full px-2 py-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md font-mono text-center font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 block">FC (lpm)</span>
+                  <input
+                    type="text"
+                    value={vitalsDraft.hr}
+                    onChange={(e) => setVitalsDraft((p) => ({ ...p, hr: e.target.value }))}
+                    className="w-full px-2 py-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md font-mono text-center font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 block">FR (rpm)</span>
+                  <input
+                    type="text"
+                    value={vitalsDraft.rr}
+                    onChange={(e) => setVitalsDraft((p) => ({ ...p, rr: e.target.value }))}
+                    className="w-full px-2 py-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md font-mono text-center font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 block">Temp (°C)</span>
+                  <input
+                    type="text"
+                    value={vitalsDraft.temp}
+                    onChange={(e) => setVitalsDraft((p) => ({ ...p, temp: e.target.value }))}
+                    className="w-full px-2 py-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md font-mono text-center font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 block">SpO2 (%)</span>
+                  <input
+                    type="text"
+                    value={vitalsDraft.spo2}
+                    onChange={(e) => setVitalsDraft((p) => ({ ...p, spo2: e.target.value }))}
+                    className="w-full px-2 py-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md font-mono text-center font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 block">Glucemia</span>
+                  <input
+                    type="text"
+                    value={vitalsDraft.glucose}
+                    onChange={(e) => setVitalsDraft((p) => ({ ...p, glucose: e.target.value }))}
+                    placeholder="mg/dL"
+                    className="w-full px-2 py-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md font-mono text-center font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 block">Peso (kg)</span>
+                  <input
+                    type="text"
+                    value={vitalsDraft.weightKg}
+                    onChange={(e) => setVitalsDraft((p) => ({ ...p, weightKg: e.target.value }))}
+                    placeholder="kg"
+                    className="w-full px-2 py-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md font-mono text-center font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+              </div>
+            </form>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+              <div
+                onClick={() => setIsEditingVitals(true)}
+                title="Clic para ingresar o actualizar Signos Vitales antes de la Nota de Evolución"
+                className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-700 dark:text-slate-300 cursor-pointer hover:text-teal-600 dark:hover:text-teal-400"
+              >
+                <span className="font-sans font-extrabold text-teal-700 dark:text-teal-400 uppercase flex items-center gap-1">
+                  <Activity className="w-3.5 h-3.5" />
+                  <span>SV:</span>
+                </span>
+                {patient.vitals?.isNew && (
+                  <span className="px-1.5 py-0.5 rounded bg-teal-600 text-white font-sans font-extrabold text-[10px] uppercase">
+                    Pre-Nota {patient.vitals.updatedAt || ''}
+                  </span>
+                )}
+                <span>
+                  TA <strong>{patient.vitals?.bp || '-'}</strong>
+                </span>
+                <span>
+                  FC <strong>{patient.vitals?.hr || '-'} lpm</strong>
+                </span>
+                <span>
+                  FR <strong>{patient.vitals?.rr || '-'} rpm</strong>
+                </span>
+                <span>
+                  Temp <strong>{patient.vitals?.temp || '-'}°C</strong>
+                </span>
+                <span>
+                  SpO2 <strong>{patient.vitals?.spo2 || '-'}%</strong>
+                </span>
+                {patient.vitals?.glucose && (
+                  <span>
+                    Gluc <strong>{patient.vitals.glucose} mg/dL</strong>
+                  </span>
+                )}
+                {patient.vitals?.weightKg && (
+                  <span>
+                    Peso <strong>{patient.vitals.weightKg} kg</strong>
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditingVitals(true)}
+                className="px-2.5 py-1 rounded-lg bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800 font-sans font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Activity className="w-3 h-3" />
+                <span>Capturar SV (Pre-Nota)</span>
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* Tab Navigation */}
-        <div className="flex border-b border-slate-200 dark:border-slate-800 bg-slate-100/60 dark:bg-slate-950/60 px-3 sm:px-6 pt-2 text-xs font-semibold gap-1.5 overflow-x-auto scrollbar-none">
+        <div className="flex items-center border-b border-slate-200 dark:border-slate-800 bg-slate-100/80 dark:bg-slate-950/80 px-3 sm:px-6 pt-2 text-xs font-semibold gap-1.5 overflow-x-auto scrollbar-none shrink-0 min-h-[44px]">
           <button
             onClick={() => setActiveTab('labs')}
             className={`py-2 px-3 border-b-2 transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
@@ -575,7 +776,7 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
             <Activity className="w-3.5 h-3.5 shrink-0" />
             <span>Laboratorios ({patient.labs.length})</span>
             {patient.labs.some((l) => l.isNew) && (
-              <span className="w-2 h-2 rounded-full bg-teal-500 animate-ping" />
+              <span className="w-2 h-2 rounded-full bg-teal-500 ring-2 ring-teal-500/30" />
             )}
           </button>
 
@@ -590,7 +791,7 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
             <FileImage className="w-3.5 h-3.5 shrink-0" />
             <span>Gabinete e Imagen ({patient.studies?.length || 0})</span>
             {patient.studies?.some((s) => s.isNew) && (
-              <span className="w-2 h-2 rounded-full bg-cyan-500 animate-ping" />
+              <span className="w-2 h-2 rounded-full bg-cyan-500 ring-2 ring-cyan-500/30" />
             )}
           </button>
 
@@ -632,21 +833,21 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
         </div>
 
         {/* Tab Content */}
-        <div className="flex-1 overflow-y-auto p-3.5 sm:p-6 space-y-5 bg-slate-50/50 dark:bg-slate-900">
+        <div className="flex-1 min-h-0 overflow-y-auto p-3.5 sm:p-6 space-y-5 bg-slate-50/50 dark:bg-slate-900">
           {/* TAB 1: LABORATORIOS & TENDENCIAS */}
           {activeTab === 'labs' && (
             <div className="space-y-6">
-              {/* Comparative Lab Matrix Card (Target of Focus Mode selector) */}
+              {/* Comparative Lab Matrix Card (Multi-Panel Comparative System) */}
               <div className="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700 shadow-xs space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <Activity className="w-4 h-4 text-teal-500" />
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <Activity className="w-4 h-4 text-teal-500 shrink-0" />
                     <h3 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-wider">
-                      Comparativa de Laboratorios y Diferencia Numérica ({comparativeLabs.length} Estudios)
+                      Comparativa Multi-Panel de Laboratorios ({comparativeLabs.length} Estudios • {comparativeAnalysis.rows.length} Parámetros)
                     </h3>
                     <InfoPopover
-                      title="Comparativa Cronológica (Antiguo → Nuevo)"
-                      content="Los estudios se muestran de izquierda (más antiguos / ingreso) a derecha (más recientes). La columna Tendencia calcula el diferencial numérico exacto (Δ) entre los últimos dos valores con flecha y semáforo clínico."
+                      title="Comparativa Cronológica Multi-Panel (Antiguo → Nuevo)"
+                      content="Compara todos los paneles clínicos registrados (BHC, Química Sanguínea/Renal, Electrólitos ES6, Pruebas de Función Hepática, Gasometría, Coagulación, Reactantes/Cardíacos y Especiales). La columna Tendencia (Δ) calcula el diferencial numérico entre los dos últimos registros disponibles de cada parámetro con semáforo clínico."
                     />
                   </div>
 
@@ -672,11 +873,11 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
                   </div>
                 </div>
 
-                {/* Preset Filter Bar: Inicial + Último, Inicial + Últimos 3, Inicial + Últimos 4, Últimos 3, Últimos 4, Por Fechas */}
+                {/* Preset Date Filter Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1 pb-2 border-b border-slate-100 dark:border-slate-700/70">
                   <div className="flex flex-wrap items-center gap-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">
-                      Filtro:
+                      Fechas:
                     </span>
                     {(
                       [
@@ -733,20 +934,61 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
                   )}
                 </div>
 
-                {/* Comparative Matrix Table: Oldest on Left -> Newest on Right */}
-                {comparativeLabs.length > 0 ? (
-                  <div className="overflow-x-auto">
+                {/* Clinical Panel / Group Filter Bar */}
+                {comparativeAnalysis.panelsWithData.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 pb-1">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1 mr-1">
+                      <Layers className="w-3 h-3 text-teal-500" />
+                      <span>Paneles:</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveLabPanelFilter('all')}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                        activeLabPanelFilter === 'all'
+                          ? 'bg-slate-900 text-white border-slate-900 dark:bg-white dark:text-slate-900 shadow-xs'
+                          : 'bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      Todos los Paneles ({comparativeAnalysis.rows.length})
+                    </button>
+                    {comparativeAnalysis.panelsWithData.map((panel) => {
+                      const count = (comparativeAnalysis.rowsByPanel[panel.id] || []).length;
+                      const isSelected = activeLabPanelFilter === panel.id;
+                      return (
+                        <button
+                          key={panel.id}
+                          type="button"
+                          onClick={() =>
+                            setActiveLabPanelFilter(isSelected ? 'all' : panel.id)
+                          }
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-teal-600 text-white border-teal-700 shadow-xs'
+                              : `${panel.badgeClass} hover:opacity-90`
+                          }`}
+                        >
+                          {panel.shortTitle} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Comparative Matrix Table: Oldest on Left -> Newest on Right, Grouped by Clinical Panel */}
+                {comparativeLabs.length > 0 && comparativeAnalysis.rows.length > 0 ? (
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
                     <table className="w-full text-center text-xs border-collapse">
                       <thead>
-                        <tr className="bg-slate-100 dark:bg-slate-900 text-[11px] text-slate-600 dark:text-slate-300 font-semibold">
-                          <th className="py-2 px-3 text-left">Parámetro</th>
+                        <tr className="bg-slate-100 dark:bg-slate-900 text-[11px] text-slate-600 dark:text-slate-300 font-semibold border-b border-slate-200 dark:border-slate-700">
+                          <th className="py-2 px-3 text-left min-w-[165px]">Parámetro / Panel</th>
                           {comparativeLabs.map((l, idx) => {
                             const isOldest = idx === 0 && comparativeLabs.length > 1;
                             const isNewest = idx === comparativeLabs.length - 1;
                             return (
                               <th
                                 key={l.id}
-                                className={`py-2 px-3 ${
+                                className={`py-2 px-3 min-w-[92px] ${
                                   isNewest ? 'bg-teal-50/70 dark:bg-teal-950/30 text-teal-800 dark:text-teal-300' : ''
                                 }`}
                               >
@@ -759,135 +1001,71 @@ export const PatientDetailModal: React.FC<PatientDetailModalProps> = ({
                               </th>
                             );
                           })}
-                          <th className="py-2 px-3 text-right">Tendencia (Δ)</th>
+                          <th className="py-2 px-3 text-right min-w-[115px]">Tendencia (Δ)</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60 font-mono">
-                        {/* Leucocitos */}
-                        <tr>
-                          <td className="py-2 px-3 text-left font-sans font-bold text-slate-700 dark:text-slate-300">
-                            Leucocitos (/uL)
-                          </td>
-                          {comparativeLabs.map((l, idx) => (
-                            <td
-                              key={l.id}
-                              className={`py-2 px-3 font-semibold ${
-                                idx === comparativeLabs.length - 1 ? 'bg-teal-50/30 dark:bg-teal-950/15 font-bold' : ''
-                              }`}
-                            >
-                              {l.leucos !== undefined ? l.leucos.toLocaleString() : '-'}
-                            </td>
-                          ))}
-                          <td className="py-2 px-3 text-right">{renderNumericTrendCell('leucos')}</td>
-                        </tr>
+                        {visiblePanels.map((panel) => {
+                          const panelRows = comparativeAnalysis.rowsByPanel[panel.id] || [];
+                          if (panelRows.length === 0) return null;
+                          return (
+                            <React.Fragment key={panel.id}>
+                              {/* Panel Group Header Row */}
+                              <tr className="bg-slate-50/95 dark:bg-slate-900/90 border-y border-slate-200/80 dark:border-slate-700/80">
+                                <td
+                                  colSpan={comparativeLabs.length + 2}
+                                  className="py-1.5 px-3 text-left font-sans"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span
+                                      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[10.5px] font-extrabold uppercase tracking-wider ${panel.badgeClass}`}
+                                    >
+                                      <span>{panel.title}</span>
+                                    </span>
+                                    <span className="text-[10px] font-semibold text-slate-400">
+                                      {panelRows.length} parámetro{panelRows.length === 1 ? '' : 's'} comparado{panelRows.length === 1 ? '' : 's'}
+                                    </span>
+                                  </div>
+                                </td>
+                              </tr>
 
-                        {/* Hemoglobina */}
-                        <tr>
-                          <td className="py-2 px-3 text-left font-sans font-bold text-slate-700 dark:text-slate-300">
-                            Hemoglobina (g/dL)
-                          </td>
-                          {comparativeLabs.map((l, idx) => (
-                            <td
-                              key={l.id}
-                              className={`py-2 px-3 font-semibold ${
-                                idx === comparativeLabs.length - 1 ? 'bg-teal-50/30 dark:bg-teal-950/15 font-bold' : ''
-                              }`}
-                            >
-                              {l.hb ?? '-'}
-                            </td>
-                          ))}
-                          <td className="py-2 px-3 text-right">{renderNumericTrendCell('hb')}</td>
-                        </tr>
-
-                        {/* Plaquetas */}
-                        <tr>
-                          <td className="py-2 px-3 text-left font-sans font-bold text-slate-700 dark:text-slate-300">
-                            Plaquetas (/uL)
-                          </td>
-                          {comparativeLabs.map((l, idx) => (
-                            <td
-                              key={l.id}
-                              className={`py-2 px-3 font-semibold ${
-                                idx === comparativeLabs.length - 1 ? 'bg-teal-50/30 dark:bg-teal-950/15 font-bold' : ''
-                              }`}
-                            >
-                              {l.plaquetas !== undefined ? l.plaquetas.toLocaleString() : '-'}
-                            </td>
-                          ))}
-                          <td className="py-2 px-3 text-right">{renderNumericTrendCell('plaquetas')}</td>
-                        </tr>
-
-                        {/* Creatinina */}
-                        <tr>
-                          <td className="py-2 px-3 text-left font-sans font-bold text-slate-700 dark:text-slate-300">
-                            Creatinina (mg/dL)
-                          </td>
-                          {comparativeLabs.map((l, idx) => (
-                            <td
-                              key={l.id}
-                              className={`py-2 px-3 font-semibold ${
-                                idx === comparativeLabs.length - 1 ? 'bg-teal-50/30 dark:bg-teal-950/15 font-bold' : ''
-                              }`}
-                            >
-                              {l.creatinina ?? '-'}
-                            </td>
-                          ))}
-                          <td className="py-2 px-3 text-right">{renderNumericTrendCell('creatinina')}</td>
-                        </tr>
-
-                        {/* Glucosa */}
-                        <tr>
-                          <td className="py-2 px-3 text-left font-sans font-bold text-slate-700 dark:text-slate-300">
-                            Glucosa (mg/dL)
-                          </td>
-                          {comparativeLabs.map((l, idx) => (
-                            <td
-                              key={l.id}
-                              className={`py-2 px-3 ${
-                                idx === comparativeLabs.length - 1 ? 'bg-teal-50/30 dark:bg-teal-950/15 font-bold' : ''
-                              }`}
-                            >
-                              {l.glucosa ?? '-'}
-                            </td>
-                          ))}
-                          <td className="py-2 px-3 text-right">{renderNumericTrendCell('glucosa')}</td>
-                        </tr>
-
-                        {/* Sodio */}
-                        <tr>
-                          <td className="py-2 px-3 text-left font-sans font-bold text-slate-700 dark:text-slate-300">
-                            Sodio (mEq/L)
-                          </td>
-                          {comparativeLabs.map((l, idx) => (
-                            <td
-                              key={l.id}
-                              className={`py-2 px-3 ${
-                                idx === comparativeLabs.length - 1 ? 'bg-teal-50/30 dark:bg-teal-950/15 font-bold' : ''
-                              }`}
-                            >
-                              {l.na ?? '-'}
-                            </td>
-                          ))}
-                          <td className="py-2 px-3 text-right">{renderNumericTrendCell('na')}</td>
-                        </tr>
-
-                        {/* Potasio */}
-                        <tr>
-                          <td className="py-2 px-3 text-left font-sans font-bold text-slate-700 dark:text-slate-300">
-                            Potasio (mEq/L)
-                          </td>
-                          {comparativeLabs.map((l, idx) => (
-                            <td
-                              key={l.id}
-                              className={`py-2 px-3 ${
-                                idx === comparativeLabs.length - 1 ? 'bg-teal-50/30 dark:bg-teal-950/15 font-bold' : ''
-                              }`}
-                            >
-                              {l.k ?? '-'}
-                            </td>
-                          ))}
-                          <td className="py-2 px-3 text-right">{renderNumericTrendCell('k')}</td>
-                        </tr>
+                              {/* Parameter Rows for this Panel */}
+                              {panelRows.map((row) => (
+                                <tr
+                                  key={row.key}
+                                  className="hover:bg-slate-50/70 dark:hover:bg-slate-800/60 transition-colors"
+                                >
+                                  <td className="py-2 px-3 text-left font-sans font-bold text-slate-700 dark:text-slate-300">
+                                    <span>{row.label}</span>
+                                    {row.unit && (
+                                      <span className="text-[10px] font-normal text-slate-400 ml-1">
+                                        ({row.unit})
+                                      </span>
+                                    )}
+                                  </td>
+                                  {row.cells.map((cell, idx) => {
+                                    const isNewestCol = idx === comparativeLabs.length - 1;
+                                    return (
+                                      <td
+                                        key={cell.labId}
+                                        className={`py-2 px-3 font-semibold ${
+                                          isNewestCol
+                                            ? 'bg-teal-50/30 dark:bg-teal-950/15 font-bold text-slate-900 dark:text-white'
+                                            : 'text-slate-700 dark:text-slate-300'
+                                        }`}
+                                      >
+                                        {cell.formatted}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="py-2 px-3 text-right">
+                                    {renderParameterTrendBadge(row)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </React.Fragment>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

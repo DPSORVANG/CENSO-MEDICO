@@ -78,8 +78,6 @@ export const NoteGeneratorModal: React.FC<NoteGeneratorModalProps> = ({
   onBackToExpediente,
   onOpenSettings,
 }) => {
-  if (!isOpen) return null;
-
   const stayDays = calculateHospitalStayDays(patient.admissionDate);
 
   // Detect newly added labs or diagnostic studies reported outside notes
@@ -129,12 +127,21 @@ export const NoteGeneratorModal: React.FC<NoteGeneratorModalProps> = ({
   ]);
 
   // 2. OBJETIVO (Signos vitales corridos al inicio de la exploración física en prosa)
-  const [bp, setBp] = useState(patient.vitals.bp || '120/80');
-  const [hr, setHr] = useState(patient.vitals.hr || '75');
-  const [rr, setRr] = useState(patient.vitals.rr || '18');
-  const [temp, setTemp] = useState(patient.vitals.temp || '36.5');
-  const [spo2, setSpo2] = useState(patient.vitals.spo2 || '96');
-  const [glucose, setGlucose] = useState(patient.vitals.glucose || '120');
+  const [bp, setBp] = useState(patient.vitals?.bp || '120/80');
+  const [hr, setHr] = useState(patient.vitals?.hr || '75');
+  const [rr, setRr] = useState(patient.vitals?.rr || '18');
+  const [temp, setTemp] = useState(patient.vitals?.temp || '36.5');
+  const [spo2, setSpo2] = useState(patient.vitals?.spo2 || '96');
+  const [glucose, setGlucose] = useState(patient.vitals?.glucose || '120');
+
+  useEffect(() => {
+    setBp(patient.vitals?.bp || '120/80');
+    setHr(patient.vitals?.hr || '75');
+    setRr(patient.vitals?.rr || '18');
+    setTemp(patient.vitals?.temp || '36.5');
+    setSpo2(patient.vitals?.spo2 || '96');
+    setGlucose(patient.vitals?.glucose || '120');
+  }, [patient.id, patient.vitals?.updatedAt]);
   const [criticalCareSystems, setCriticalCareSystems] = useState<CriticalCareSystemsData>(() => {
     if (patient.criticalCareSystems) return patient.criticalCareSystems;
     return {
@@ -425,6 +432,9 @@ export const NoteGeneratorModal: React.FC<NoteGeneratorModalProps> = ({
         temp,
         spo2,
         glucose,
+        weightKg: patient.vitals?.weightKg,
+        updatedAt: patient.vitals?.updatedAt,
+        isNew: markParaclinicsIntegratedNoteId ? false : patient.vitals?.isNew,
       },
       diet: dietPlan.trim(),
       dietSpecialNotes: dietSpecialNotes.trim() || undefined,
@@ -605,6 +615,8 @@ export const NoteGeneratorModal: React.FC<NoteGeneratorModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
 
   const handleMoveMedication = (fromIdx: number, toIdx: number) => {
     if (toIdx < 0 || toIdx >= localMedications.length || fromIdx === toIdx) return;
@@ -1079,8 +1091,8 @@ export const NoteGeneratorModal: React.FC<NoteGeneratorModalProps> = ({
 
                 {/* O - OBJETIVO (Signos vitales corridos al inicio de la Exploración Física en prosa + Paraclínicos cronológicos) */}
                 <div className="bg-slate-50/70 dark:bg-slate-950/40 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="w-5 h-5 rounded-md bg-blue-600 text-white flex items-center justify-center font-bold text-xs">
                         O
                       </span>
@@ -1089,9 +1101,34 @@ export const NoteGeneratorModal: React.FC<NoteGeneratorModalProps> = ({
                       </h3>
                       <InfoPopover
                         title="Signos Vitales y Exploración en Prosa"
-                        content="Los signos vitales se integran corridos en una sola línea justo al inicio del párrafo de la exploración física para ahorrar espacio en hoja blanca institucional."
+                        content="Los signos vitales capturados antes de la nota (en el censo o expediente durante el pase) se cargan automáticamente aquí y se integran corridos al inicio de la exploración física."
                       />
+                      {patient.vitals?.isNew && (
+                        <span className="px-2 py-0.5 rounded-md bg-teal-600 text-white font-bold text-[10px] uppercase tracking-wide flex items-center gap-1">
+                          <Check className="w-3 h-3" />
+                          <span>
+                            SV Pre-Nota Cargados
+                            {patient.vitals.updatedAt ? ` (${patient.vitals.updatedAt})` : ''}
+                          </span>
+                        </span>
+                      )}
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBp(patient.vitals?.bp || '120/80');
+                        setHr(patient.vitals?.hr || '75');
+                        setRr(patient.vitals?.rr || '18');
+                        setTemp(patient.vitals?.temp || '36.5');
+                        setSpo2(patient.vitals?.spo2 || '96');
+                        setGlucose(patient.vitals?.glucose || '');
+                      }}
+                      title="Restaurar los signos vitales guardados actualmente en el censo del paciente"
+                      className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-teal-700 dark:text-teal-300 hover:bg-teal-50 dark:hover:bg-teal-950/50 cursor-pointer"
+                    >
+                      Traer SV del Censo
+                    </button>
                   </div>
 
                   {/* Signos Vitales Compactos */}

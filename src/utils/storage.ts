@@ -111,6 +111,8 @@ export function isPatientDeletedByTombstone(
   return true;
 }
 
+const SEED_PATIENT_BY_ID = new Map<string, Patient>(seedPatients.map((sp) => [sp.id, sp]));
+
 export function normalizePatientRecord(pt: Patient): Patient {
   const normalizedNursingOrders = Array.isArray(pt.nursingOrders)
     ? pt.nursingOrders
@@ -137,11 +139,38 @@ export function normalizePatientRecord(pt: Patient): Patient {
         .filter(Boolean)
     : normalizedDiagnoses;
 
+  // Backfill longitudinal multi-panel lab values for seed patients if their stored labs predated the multi-panel upgrade
+  const seedRef = SEED_PATIENT_BY_ID.get(pt.id);
+  let normalizedLabs = Array.isArray(pt.labs) ? pt.labs : [];
+  if (seedRef && seedRef.labs && seedRef.labs.length > 0) {
+    const seedLabById = new Map(seedRef.labs.map((l) => [l.id, l]));
+    normalizedLabs = normalizedLabs.map((l) => {
+      const seedLab = seedLabById.get(l.id);
+      if (!seedLab) return l;
+      return {
+        ...seedLab,
+        ...Object.fromEntries(
+          Object.entries(l).filter(([, v]) => v !== undefined && v !== null && v !== '')
+        ),
+      };
+    });
+    // For p-104 which previously only had 1 seed lab ('lab-401'), ensure 'lab-402' is also present if unmodified
+    if (
+      pt.id === 'p-104' &&
+      normalizedLabs.length === 1 &&
+      normalizedLabs[0].id === 'lab-401' &&
+      seedRef.labs.length >= 2
+    ) {
+      normalizedLabs = seedRef.labs;
+    }
+  }
+
   return {
     ...pt,
     diagnoses: normalizedDiagnoses,
     initialDiagnoses: normalizedInitialDiagnoses,
     nursingOrders: normalizedNursingOrders,
+    labs: normalizedLabs,
     medications: (pt.medications || []).map((m) =>
       m.id === 'm-203' && m.isLimitedCourse === undefined
         ? {

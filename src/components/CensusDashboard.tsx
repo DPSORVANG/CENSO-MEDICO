@@ -69,6 +69,8 @@ import {
   isBackupOverdue24h,
   shouldShowFloatingSearchButton,
   buildCompactLabSummaryItems,
+  buildPatientComparativeLabAnalysis,
+  ComparativeLabPanelId,
 } from '../utils/clinicalLogic.ts';
 import {
   defaultServicesCatalog,
@@ -259,6 +261,70 @@ export const CensusDashboard: React.FC<CensusDashboardProps> = ({
   const [openCriticalEditorPatientId, setOpenCriticalEditorPatientId] = useState<string | null>(
     null
   );
+
+  // Per-card Laboratory Panel Filter & Full Expansion in Active Census
+  const [cardLabPanelFilterById, setCardLabPanelFilterById] = useState<
+    Record<string, 'all' | ComparativeLabPanelId>
+  >({});
+  const [expandedCardLabsById, setExpandedCardLabsById] = useState<Record<string, boolean>>({});
+
+  // Inline Pre-Note Signos Vitales Capture state (for rounds / pre-rounds before generating the progress note)
+  const [editingVitalsPatientId, setEditingVitalsPatientId] = useState<string | null>(null);
+  const [vitalsDraft, setVitalsDraft] = useState<{
+    bp: string;
+    hr: string;
+    rr: string;
+    temp: string;
+    spo2: string;
+    glucose: string;
+    weightKg: string;
+  }>({
+    bp: '',
+    hr: '',
+    rr: '',
+    temp: '',
+    spo2: '',
+    glucose: '',
+    weightKg: '',
+  });
+
+  const openVitalsQuickEditor = (p: Patient) => {
+    setEditingVitalsPatientId(p.id);
+    setVitalsDraft({
+      bp: p.vitals?.bp || '120/80',
+      hr: p.vitals?.hr || '75',
+      rr: p.vitals?.rr || '18',
+      temp: p.vitals?.temp || '36.5',
+      spo2: p.vitals?.spo2 || '96',
+      glucose: p.vitals?.glucose || '',
+      weightKg: p.vitals?.weightKg ? String(p.vitals.weightKg) : '',
+    });
+  };
+
+  const handleSaveVitalsDraft = (p: Patient) => {
+    if (!onUpdatePatient) return;
+    const nowTime = new Date().toLocaleTimeString('es-MX', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const parsedWeight = parseFloat(vitalsDraft.weightKg);
+    onUpdatePatient({
+      ...p,
+      vitals: {
+        bp: vitalsDraft.bp.trim() || p.vitals?.bp || '120/80',
+        hr: vitalsDraft.hr.trim() || p.vitals?.hr || '75',
+        rr: vitalsDraft.rr.trim() || p.vitals?.rr || '18',
+        temp: vitalsDraft.temp.trim() || p.vitals?.temp || '36.5',
+        spo2: vitalsDraft.spo2.trim() || p.vitals?.spo2 || '96',
+        glucose: vitalsDraft.glucose.trim() || undefined,
+        weightKg: !isNaN(parsedWeight) && parsedWeight > 0 ? parsedWeight : p.vitals?.weightKg,
+        updatedAt: nowTime,
+        isNew: true,
+      },
+      lastUpdated: new Date().toISOString(),
+    });
+    setEditingVitalsPatientId(null);
+  };
 
   const doctorsCatalogItems = useMemo(() => {
     if (attendingPhysicians && attendingPhysicians.length > 0) {
@@ -593,8 +659,13 @@ export const CensusDashboard: React.FC<CensusDashboardProps> = ({
 
   const handleCreateQuickPending = (e: React.FormEvent) => {
     e.preventDefault();
+    const activePatientsList = patients.filter((p) => p.status === 'active');
+    const validSelected = activePatientsList.some((p) => p.id === quickPendingPatientId)
+      ? quickPendingPatientId
+      : '';
     const targetId =
-      quickPendingPatientId || (filteredPatients[0] ? filteredPatients[0].id : '');
+      validSelected ||
+      (filteredPatients[0] ? filteredPatients[0].id : activePatientsList[0]?.id || '');
     if (!targetId || !onAddQuickPending) return;
 
     const cleanDetail = quickPendingDetail.trim();
@@ -2329,70 +2400,248 @@ export const CensusDashboard: React.FC<CensusDashboardProps> = ({
                       BLOQUE 2: EVOLUCIÓN ACTUAL, SIGNOS VITALES, SISTEMAS CRÍTICOS Y PARACLÍNICOS
                      ========================================================================= */}
                   <div className="p-3.5 sm:p-4 bg-slate-50/60 dark:bg-slate-950/40 space-y-2.5 flex-1">
-                    {/* 2A. Signos Vitales de Guardia / Matutinos */}
-                    {patient.vitals && (
-                      <div className="flex flex-wrap items-center justify-between gap-x-2.5 gap-y-1 px-3 py-1.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200/90 dark:border-slate-800 text-xs sm:text-sm font-mono tabular-nums text-slate-700 dark:text-slate-300">
-                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                          <span className="flex items-center gap-1 font-sans font-extrabold text-teal-700 dark:text-teal-400 text-xs uppercase">
-                            <Activity className="w-3.5 h-3.5" />
-                            SV:
-                          </span>
-                          <span>
-                            TA <strong>{patient.vitals.bp}</strong>
-                            {computedPam !== null && (
-                              <span className="text-xs text-slate-500"> (PAM {computedPam})</span>
-                            )}
-                          </span>
-                          <span>
-                            FC <strong>{patient.vitals.hr}</strong>
-                          </span>
-                          <span>
-                            FR <strong>{patient.vitals.rr}</strong>
-                          </span>
-                          <span>
-                            T <strong>{patient.vitals.temp}°C</strong>
-                          </span>
-                          <span>
-                            SpO2 <strong>{patient.vitals.spo2}%</strong>
-                          </span>
-                          {patient.vitals.glucose && (
-                            <span>
-                              Gluc <strong>{patient.vitals.glucose}</strong>
+                    {/* 2A. Signos Vitales de Guardia / Matutinos (Con Captura Pre-Nota para el Pase de Visita) */}
+                    {editingVitalsPatientId === patient.id ? (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          handleSaveVitalsDraft(patient);
+                        }}
+                        className="p-3 bg-teal-50/70 dark:bg-teal-950/35 rounded-xl border border-teal-400 dark:border-teal-700 space-y-2.5 shadow-xs"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <Activity className="w-4 h-4 text-teal-600 dark:text-teal-400 shrink-0" />
+                            <span className="text-xs font-extrabold uppercase tracking-wider text-teal-800 dark:text-teal-300">
+                              Captura de Signos Vitales (Pre-Nota / Pase)
                             </span>
-                          )}
+                          </div>
+                          <span className="text-[11px] font-semibold text-teal-700 dark:text-teal-300 bg-teal-100/80 dark:bg-teal-900/50 px-2 py-0.5 rounded-md">
+                            Se cargarán automáticamente al abrir la Nota de Evolución
+                          </span>
                         </div>
 
-                        {onUpdatePatient && (
+                        <div className="grid grid-cols-3 sm:grid-cols-7 gap-2 text-xs">
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 dark:text-slate-300 block mb-0.5">
+                              TA (mmHg)
+                            </label>
+                            <input
+                              type="text"
+                              value={vitalsDraft.bp}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, bp: e.target.value }))
+                              }
+                              placeholder="120/80"
+                              autoFocus
+                              className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg font-mono text-center font-bold text-slate-900 dark:text-white focus:outline-none focus:border-teal-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 dark:text-slate-300 block mb-0.5">
+                              FC (lpm)
+                            </label>
+                            <input
+                              type="text"
+                              value={vitalsDraft.hr}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, hr: e.target.value }))
+                              }
+                              placeholder="75"
+                              className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg font-mono text-center font-bold text-slate-900 dark:text-white focus:outline-none focus:border-teal-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 dark:text-slate-300 block mb-0.5">
+                              FR (rpm)
+                            </label>
+                            <input
+                              type="text"
+                              value={vitalsDraft.rr}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, rr: e.target.value }))
+                              }
+                              placeholder="18"
+                              className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg font-mono text-center font-bold text-slate-900 dark:text-white focus:outline-none focus:border-teal-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 dark:text-slate-300 block mb-0.5">
+                              Temp (°C)
+                            </label>
+                            <input
+                              type="text"
+                              value={vitalsDraft.temp}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, temp: e.target.value }))
+                              }
+                              placeholder="36.5"
+                              className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg font-mono text-center font-bold text-slate-900 dark:text-white focus:outline-none focus:border-teal-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 dark:text-slate-300 block mb-0.5">
+                              SpO2 (%)
+                            </label>
+                            <input
+                              type="text"
+                              value={vitalsDraft.spo2}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, spo2: e.target.value }))
+                              }
+                              placeholder="96"
+                              className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg font-mono text-center font-bold text-slate-900 dark:text-white focus:outline-none focus:border-teal-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 dark:text-slate-300 block mb-0.5">
+                              Gluc (mg/dL)
+                            </label>
+                            <input
+                              type="text"
+                              value={vitalsDraft.glucose}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, glucose: e.target.value }))
+                              }
+                              placeholder="110"
+                              className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg font-mono text-center font-bold text-slate-900 dark:text-white focus:outline-none focus:border-teal-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 dark:text-slate-300 block mb-0.5">
+                              Peso (kg)
+                            </label>
+                            <input
+                              type="text"
+                              value={vitalsDraft.weightKg}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, weightKg: e.target.value }))
+                              }
+                              placeholder="70"
+                              className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg font-mono text-center font-bold text-slate-900 dark:text-white focus:outline-none focus:border-teal-500"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-end gap-2 pt-1">
                           <button
                             type="button"
-                            onClick={() =>
-                              setOpenCriticalEditorPatientId(
-                                openCriticalEditorPatientId === patient.id ? null : patient.id
-                              )
-                            }
-                            className={`font-sans text-xs font-bold px-2.5 py-0.5 rounded-md border flex items-center gap-1 transition-colors cursor-pointer ${
-                              criticalSummaryItems.length > 0 ||
-                              openCriticalEditorPatientId === patient.id
-                                ? 'bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800'
-                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:text-rose-600'
-                            }`}
-                            title="Evolución y parámetros clínicos por sistemas (Opcional — Todos los pacientes)"
+                            onClick={() => setEditingVitalsPatientId(null)}
+                            className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 cursor-pointer"
                           >
-                            <HeartPulse className="w-3.5 h-3.5 shrink-0" />
-                            <span>
-                              Sistemas
-                              {criticalSummaryItems.length > 0
-                                ? ` (${criticalSummaryItems.length})`
-                                : ''}
-                            </span>
-                            {openCriticalEditorPatientId === patient.id ? (
-                              <ChevronUp className="w-3.5 h-3.5" />
-                            ) : (
-                              <ChevronDown className="w-3.5 h-3.5" />
-                            )}
+                            Cancelar
                           </button>
-                        )}
-                      </div>
+                          <button
+                            type="submit"
+                            className="px-3 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-extrabold flex items-center gap-1 shadow-2xs cursor-pointer"
+                          >
+                            <Check className="w-3.5 h-3.5 shrink-0" />
+                            <span>Guardar SV para la Nota</span>
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      patient.vitals && (
+                        <div className="flex flex-wrap items-center justify-between gap-x-2.5 gap-y-1.5 px-3 py-1.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200/90 dark:border-slate-800 text-xs sm:text-sm font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                          <div
+                            onClick={() => onUpdatePatient && openVitalsQuickEditor(patient)}
+                            title={
+                              onUpdatePatient
+                                ? 'Clic para capturar o actualizar Signos Vitales antes de la Nota de Evolución'
+                                : undefined
+                            }
+                            className={`flex flex-wrap items-center gap-x-2.5 gap-y-1 ${
+                              onUpdatePatient
+                                ? 'cursor-pointer hover:text-teal-700 dark:hover:text-teal-300 transition-colors'
+                                : ''
+                            }`}
+                          >
+                            <span className="flex items-center gap-1 font-sans font-extrabold text-teal-700 dark:text-teal-400 text-xs uppercase">
+                              <Activity className="w-3.5 h-3.5" />
+                              SV:
+                            </span>
+                            {patient.vitals.isNew && (
+                              <span
+                                className="px-1.5 py-0.5 rounded bg-teal-600 text-white font-sans font-extrabold text-[10px] uppercase tracking-wide"
+                                title="Signos vitales capturados en el pase, listos para integrarse en la Nota de Evolución"
+                              >
+                                Pre-Nota{patient.vitals.updatedAt ? ` ${patient.vitals.updatedAt}` : ''}
+                              </span>
+                            )}
+                            <span>
+                              TA <strong>{patient.vitals.bp}</strong>
+                              {computedPam !== null && (
+                                <span className="text-xs text-slate-500"> (PAM {computedPam})</span>
+                              )}
+                            </span>
+                            <span>
+                              FC <strong>{patient.vitals.hr}</strong>
+                            </span>
+                            <span>
+                              FR <strong>{patient.vitals.rr}</strong>
+                            </span>
+                            <span>
+                              T <strong>{patient.vitals.temp}°C</strong>
+                            </span>
+                            <span>
+                              SpO2 <strong>{patient.vitals.spo2}%</strong>
+                            </span>
+                            {patient.vitals.glucose && (
+                              <span>
+                                Gluc <strong>{patient.vitals.glucose}</strong>
+                              </span>
+                            )}
+                            {patient.vitals.weightKg && (
+                              <span>
+                                Peso <strong>{patient.vitals.weightKg}kg</strong>
+                              </span>
+                            )}
+                          </div>
+
+                          {onUpdatePatient && (
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => openVitalsQuickEditor(patient)}
+                                className="font-sans text-xs font-bold px-2 py-0.5 rounded-md border bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800 flex items-center gap-1 transition-colors cursor-pointer"
+                                title="Ingresar Signos Vitales antes de la Nota de Evolución"
+                              >
+                                <FileEdit className="w-3 h-3 shrink-0" />
+                                <span>SV</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setOpenCriticalEditorPatientId(
+                                    openCriticalEditorPatientId === patient.id ? null : patient.id
+                                  )
+                                }
+                                className={`font-sans text-xs font-bold px-2.5 py-0.5 rounded-md border flex items-center gap-1 transition-colors cursor-pointer ${
+                                  criticalSummaryItems.length > 0 ||
+                                  openCriticalEditorPatientId === patient.id
+                                    ? 'bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:text-rose-600'
+                                }`}
+                                title="Evolución por Sistemas"
+                              >
+                                <HeartPulse className="w-3.5 h-3.5 shrink-0" />
+                                <span>
+                                  Evolución por Sistemas
+                                  {criticalSummaryItems.length > 0
+                                    ? ` (${criticalSummaryItems.length})`
+                                    : ''}
+                                </span>
+                                {openCriticalEditorPatientId === patient.id ? (
+                                  <ChevronUp className="w-3.5 h-3.5" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )
                     )}
 
                     {/* 2B. Resumen / Apunte Temporal para Presentación en el Pase de Visita */}
@@ -2477,15 +2726,14 @@ export const CensusDashboard: React.FC<CensusDashboardProps> = ({
                       </button>
                     )}
 
-                    {/* 2C. Evolución Clínica de Paciente Crítico por Sistemas */}
+                    {/* 2C. Evolución por Sistemas */}
                     {openCriticalEditorPatientId === patient.id && onUpdatePatient ? (
                       <div className="pt-1">
                         <CriticalCareSystemsEditor
-                          value={
-                            patient.criticalCareSystems || {
-                              enabled: true,
-                            }
-                          }
+                          value={{
+                            ...(patient.criticalCareSystems || {}),
+                            enabled: true,
+                          }}
                           onChange={(updatedSystems: CriticalCareSystemsData) => {
                             onUpdatePatient({
                               ...patient,
@@ -2494,6 +2742,7 @@ export const CensusDashboard: React.FC<CensusDashboardProps> = ({
                             });
                           }}
                           patient={patient}
+                          onCloseEditor={() => setOpenCriticalEditorPatientId(null)}
                         />
                       </div>
                     ) : (
@@ -2524,136 +2773,234 @@ export const CensusDashboard: React.FC<CensusDashboardProps> = ({
                       )
                     )}
 
-                    {/* 2D. Estudios de Laboratorio y Gabinete Recientes + Comparativa con Guardia Previa */}
+                    {/* 2D. Estudios de Laboratorio y Gabinete Recientes + Comparativa Multi-Panel con Guardia Previa */}
                     {(latestLab || (patient.studies && patient.studies.length > 0)) && (
                       <div className="space-y-1.5">
-                        {latestLab && (
-                          <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1.5">
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="font-extrabold uppercase tracking-wider text-slate-500">
-                                Labs ({latestLab.date.slice(5)}
-                                {previousLab ? ` vs ${previousLab.date.slice(5)}` : ''})
-                              </span>
-                              {latestLab.isNew && (
-                                <span className="px-1.5 py-0.5 rounded bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-300 font-bold text-[11px]">
-                                  NUEVO
-                                </span>
-                              )}
-                            </div>
+                        {latestLab && (() => {
+                          const labAnalysis = buildPatientComparativeLabAnalysis(patient.labs);
+                          const selectedPanel = cardLabPanelFilterById[patient.id] || 'all';
+                          const isExpanded = Boolean(expandedCardLabsById[patient.id]);
 
-                            <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 text-center font-mono tabular-nums">
-                              {[
-                                {
-                                  label: 'Leucos',
-                                  curr: latestLab.leucos,
-                                  prev: previousLab?.leucos,
-                                  fmt: (v: number) =>
-                                    v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v),
-                                },
-                                {
-                                  label: 'Hb',
-                                  curr: latestLab.hb,
-                                  prev: previousLab?.hb,
-                                  fmt: (v: number) => String(v),
-                                },
-                                {
-                                  label: 'Plaq',
-                                  curr: latestLab.plaquetas,
-                                  prev: previousLab?.plaquetas,
-                                  fmt: (v: number) =>
-                                    v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(v),
-                                },
-                                {
-                                  label: 'Cr',
-                                  curr: latestLab.creatinina,
-                                  prev: previousLab?.creatinina,
-                                  fmt: (v: number) => String(v),
-                                },
-                                {
-                                  label: 'Gluc',
-                                  curr: latestLab.glucosa,
-                                  prev: previousLab?.glucosa,
-                                  fmt: (v: number) => String(v),
-                                },
-                                {
-                                  label: 'Na / K',
-                                  curr: latestLab.na,
-                                  prev: previousLab?.na,
-                                  fmt: () =>
-                                    `${latestLab.na ?? '-'}/${latestLab.k ?? '-'}`,
-                                },
-                              ]
-                                .filter(
-                                  (item) =>
-                                    item.curr !== undefined ||
-                                    (item.label === 'Na / K' && latestLab.k !== undefined)
-                                )
-                                .map((item) => (
-                                  <div
-                                    key={item.label}
-                                    className="bg-slate-50 dark:bg-slate-800/70 px-1.5 py-1 rounded-lg border border-slate-200/70 dark:border-slate-700/70"
+                          // Priority clinical order when viewing 'all' panels
+                          const priorityKeys = new Set([
+                            'leucos',
+                            'hb',
+                            'plaquetas',
+                            'creatinina',
+                            'urea',
+                            'bun',
+                            'glucosa',
+                            'na',
+                            'k',
+                            'cl',
+                            'calcium',
+                            'phosphorus',
+                            'magnesium',
+                            'biliTotal',
+                            'ast',
+                            'alt',
+                            'albumin',
+                            'ph',
+                            'pco2',
+                            'hco3',
+                            'lactato',
+                            'inr',
+                            'pcr',
+                            'procalcitonina',
+                            'troponin',
+                            'bnp',
+                            'lipase',
+                          ]);
+
+                          const filteredRows =
+                            selectedPanel === 'all'
+                              ? [...labAnalysis.rows].sort((a, b) => {
+                                  const aPri = priorityKeys.has(a.key) ? 0 : 1;
+                                  const bPri = priorityKeys.has(b.key) ? 0 : 1;
+                                  return aPri - bPri;
+                                })
+                              : labAnalysis.rowsByPanel[selectedPanel] || [];
+
+                          const DEFAULT_VISIBLE_COUNT = 12;
+                          const visibleRows =
+                            selectedPanel !== 'all' || isExpanded
+                              ? filteredRows
+                              : filteredRows.slice(0, DEFAULT_VISIBLE_COUNT);
+                          const hiddenCount =
+                            selectedPanel === 'all' && !isExpanded
+                              ? Math.max(0, filteredRows.length - DEFAULT_VISIBLE_COUNT)
+                              : 0;
+
+                          return (
+                            <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2">
+                              {/* Header row: Dates + Panels count + NUEVO / Ver matriz */}
+                              <div className="flex flex-wrap items-center justify-between gap-1.5 text-xs">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="font-extrabold uppercase tracking-wider text-slate-600 dark:text-slate-300 flex items-center gap-1">
+                                    <FlaskConical className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+                                    <span>
+                                      Labs ({latestLab.date.slice(5)}
+                                      {previousLab ? ` vs ${previousLab.date.slice(5)}` : ''})
+                                    </span>
+                                  </span>
+                                  <span className="text-[10.5px] font-semibold text-slate-400">
+                                    • {labAnalysis.panelsWithData.length} panel{labAnalysis.panelsWithData.length === 1 ? '' : 'es'} ({labAnalysis.rows.length} parám.)
+                                  </span>
+                                  {latestLab.isNew && (
+                                    <span className="px-1.5 py-0.5 rounded bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-300 font-bold text-[10px]">
+                                      NUEVO
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-1">
+                                  {selectedPanel === 'all' && filteredRows.length > DEFAULT_VISIBLE_COUNT && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setExpandedCardLabsById((prev) => ({
+                                          ...prev,
+                                          [patient.id]: !isExpanded,
+                                        }))
+                                      }
+                                      className="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-[10.5px] cursor-pointer transition-colors"
+                                    >
+                                      {isExpanded
+                                        ? 'Compactar'
+                                        : `+Ver todos (${filteredRows.length})`}
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => onSelectPatient(patient)}
+                                    title="Abrir tabla comparativa completa en el Expediente"
+                                    className="px-2 py-0.5 rounded-md bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800 font-bold text-[10.5px] cursor-pointer transition-colors"
                                   >
-                                    <div className="text-[11px] font-sans text-slate-400">
-                                      {item.label}
+                                    Tabla Δ
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Multi-Panel Filter Pills */}
+                              {labAnalysis.panelsWithData.length > 1 && (
+                                <div className="flex flex-wrap items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setCardLabPanelFilterById((prev) => ({
+                                        ...prev,
+                                        [patient.id]: 'all',
+                                      }))
+                                    }
+                                    className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold border transition-all cursor-pointer ${
+                                      selectedPanel === 'all'
+                                        ? 'bg-slate-900 text-white border-slate-900 dark:bg-white dark:text-slate-900'
+                                        : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                                    }`}
+                                  >
+                                    Todos ({labAnalysis.rows.length})
+                                  </button>
+                                  {labAnalysis.panelsWithData.map((panel) => {
+                                    const pCount = (labAnalysis.rowsByPanel[panel.id] || []).length;
+                                    const active = selectedPanel === panel.id;
+                                    return (
+                                      <button
+                                        key={panel.id}
+                                        type="button"
+                                        onClick={() =>
+                                          setCardLabPanelFilterById((prev) => ({
+                                            ...prev,
+                                            [patient.id]: active ? 'all' : panel.id,
+                                          }))
+                                        }
+                                        title={`Filtrar comparativa de ${panel.title}`}
+                                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition-all cursor-pointer ${
+                                          active
+                                            ? 'bg-teal-600 text-white border-teal-700 shadow-2xs'
+                                            : `${panel.badgeClass} hover:opacity-90`
+                                        }`}
+                                      >
+                                        {panel.shortTitle} ({pCount})
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              {/* Comparative Parameter Cells Grid */}
+                              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 text-center font-mono tabular-nums">
+                                {visibleRows.map((row) => (
+                                  <div
+                                    key={row.key}
+                                    title={`${row.label}${row.unit ? ` (${row.unit})` : ''}: Actual ${row.latestFormatted ?? '-'}${
+                                      row.previousFormatted !== undefined
+                                        ? ` | Previo ${row.previousFormatted} (${row.trend.formattedDiff})`
+                                        : ''
+                                    }`}
+                                    className="bg-slate-50 dark:bg-slate-800/70 px-1.5 py-1 rounded-lg border border-slate-200/70 dark:border-slate-700/70 flex flex-col justify-between"
+                                  >
+                                    <div className="text-[10.5px] font-sans font-semibold text-slate-500 dark:text-slate-400 truncate">
+                                      {row.shortLabel}
                                     </div>
-                                    <div className="font-bold text-slate-900 dark:text-slate-100 text-xs sm:text-sm flex items-center justify-center gap-0.5">
-                                      <span>{item.fmt(item.curr as number)}</span>
-                                      {item.prev !== undefined &&
-                                        item.curr !== undefined &&
-                                        item.label !== 'Na / K' &&
-                                        (item.curr > item.prev ? (
-                                          <TrendingUp className="w-3 h-3 text-rose-500 shrink-0" />
-                                        ) : item.curr < item.prev ? (
-                                          <TrendingDown className="w-3 h-3 text-emerald-500 shrink-0" />
-                                        ) : (
-                                          <Minus className="w-3 h-3 text-slate-400 shrink-0" />
-                                        ))}
+                                    <div className="font-bold text-slate-900 dark:text-slate-100 text-xs sm:text-[13px] flex items-center justify-center gap-0.5 leading-tight mt-0.5">
+                                      <span>{row.latestFormatted ?? '-'}</span>
+                                      {row.trend.hasTrend && (
+                                        <>
+                                          {row.trend.direction === 'up' && (
+                                            <TrendingUp
+                                              className={`w-3 h-3 shrink-0 ${row.trend.iconColorClass}`}
+                                            />
+                                          )}
+                                          {row.trend.direction === 'down' && (
+                                            <TrendingDown
+                                              className={`w-3 h-3 shrink-0 ${row.trend.iconColorClass}`}
+                                            />
+                                          )}
+                                          {row.trend.direction === 'equal' && (
+                                            <Minus className="w-3 h-3 text-slate-400 shrink-0" />
+                                          )}
+                                        </>
+                                      )}
                                     </div>
-                                    {item.prev !== undefined && item.label !== 'Na / K' && (
-                                      <div className="text-[10px] text-slate-400 leading-none mt-0.5">
-                                        prev {item.fmt(item.prev)}
+                                    {row.previousFormatted !== undefined ? (
+                                      <div className="text-[9.5px] text-slate-400 dark:text-slate-400 leading-none mt-0.5 truncate">
+                                        prev {row.previousFormatted}
+                                        {row.trend.hasTrend && row.trend.direction !== 'equal'
+                                          ? ` (${row.trend.formattedDiff})`
+                                          : ''}
+                                      </div>
+                                    ) : (
+                                      <div className="text-[9.5px] text-slate-300 dark:text-slate-600 leading-none mt-0.5">
+                                        1er reg.
                                       </div>
                                     )}
                                   </div>
                                 ))}
-                            </div>
-
-                            {/* Gasometry or Extra Panel Parameters if present */}
-                            {(latestLab.ph !== undefined ||
-                              latestLab.lactato !== undefined ||
-                              latestLab.pcr !== undefined ||
-                              extraLabEntries.length > 0) && (
-                              <div className="flex flex-wrap gap-1.5 pt-0.5 font-mono text-xs">
-                                {latestLab.ph !== undefined && (
-                                  <span className="px-2 py-0.5 rounded bg-sky-50 dark:bg-sky-950/60 text-sky-800 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
-                                    pH {latestLab.ph}
-                                    {latestLab.pco2 !== undefined ? ` · pCO2 ${latestLab.pco2}` : ''}
-                                    {latestLab.hco3 !== undefined ? ` · HCO3 ${latestLab.hco3}` : ''}
-                                  </span>
-                                )}
-                                {latestLab.lactato !== undefined && (
-                                  <span className="px-2 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800 font-bold">
-                                    Lac {latestLab.lactato}
-                                  </span>
-                                )}
-                                {latestLab.pcr !== undefined && (
-                                  <span className="px-2 py-0.5 rounded bg-purple-50 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
-                                    PCR {latestLab.pcr}
-                                  </span>
-                                )}
-                                {extraLabEntries.slice(0, 8).map((ep, idx) => (
-                                  <span
-                                    key={idx}
-                                    className="px-2 py-0.5 rounded bg-teal-50/80 dark:bg-teal-950/50 text-teal-900 dark:text-teal-200 border border-teal-200 dark:border-teal-800"
-                                  >
-                                    {ep.label}: <strong>{ep.value}</strong>
-                                    {ep.unit ? ` ${ep.unit}` : ''}
-                                  </span>
-                                ))}
                               </div>
-                            )}
-                          </div>
-                        )}
+
+                              {/* Footer indicator when more parameters exist */}
+                              {hiddenCount > 0 && (
+                                <div className="flex items-center justify-between pt-0.5 text-[10.5px] text-slate-500">
+                                  <span>
+                                    Mostrando {visibleRows.length} de {filteredRows.length} parámetros con comparativa
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setExpandedCardLabsById((prev) => ({
+                                        ...prev,
+                                        [patient.id]: true,
+                                      }))
+                                    }
+                                    className="font-bold text-teal-600 dark:text-teal-400 hover:underline cursor-pointer"
+                                  >
+                                    + Desplegar {hiddenCount} parámetro{hiddenCount === 1 ? '' : 's'} más (PFH, ES6, Gaso, Coag...)
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
 
                         {/* Estudios de Gabinete / Imagen / Cultivos recientes */}
                         {patient.studies && patient.studies.length > 0 && (
@@ -2953,7 +3300,11 @@ export const CensusDashboard: React.FC<CensusDashboardProps> = ({
                 const latestLab = patient.labs && patient.labs.length > 0 ? patient.labs[0] : null;
                 const previousLab =
                   patient.labs && patient.labs.length > 1 ? patient.labs[1] : null;
-                const compactLabChips = buildCompactLabSummaryItems(latestLab, previousLab);
+                const compactLabChips = buildCompactLabSummaryItems(
+                  latestLab,
+                  previousLab,
+                  patient.labs
+                );
                 const criticalSummaryItems = formatCriticalCareSystemsSummary(
                   patient.criticalCareSystems
                 );
@@ -3203,28 +3554,145 @@ export const CensusDashboard: React.FC<CensusDashboardProps> = ({
                       title="Clic para abrir el cuadro detallado de este paciente"
                       className="lg:col-span-3 space-y-1.5 min-w-0 cursor-pointer lg:border-l lg:border-slate-100 dark:lg:border-slate-800 lg:pl-3"
                     >
-                      {/* Signos Vitales Compact Strip */}
-                      <div className="px-2 py-1 rounded-lg bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-slate-700/80 font-mono text-[11px] flex flex-wrap items-center gap-x-2 gap-y-0.5 text-slate-700 dark:text-slate-200">
-                        <span className="font-extrabold text-teal-600 dark:text-teal-400">SV:</span>
-                        <span>
-                          TA <strong>{patient.vitals?.bp || '-'}</strong>
-                          {computedPam ? ` (PAM ${computedPam})` : ''}
-                        </span>
-                        <span>
-                          FC <strong>{patient.vitals?.hr || '-'}</strong>
-                        </span>
-                        <span>
-                          T <strong>{patient.vitals?.temp || '-'}°</strong>
-                        </span>
-                        <span>
-                          SpO2 <strong>{patient.vitals?.spo2 || '-'}%</strong>
-                        </span>
-                        {patient.vitals?.glucose && (
-                          <span>
-                            Gluc <strong>{patient.vitals.glucose}</strong>
-                          </span>
-                        )}
-                      </div>
+                      {/* Signos Vitales Compact Strip (Clic en SV para capturar antes de la nota) */}
+                      {editingVitalsPatientId === patient.id ? (
+                        <form
+                          onClick={(e) => e.stopPropagation()}
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleSaveVitalsDraft(patient);
+                          }}
+                          className="p-2 rounded-lg bg-teal-50/90 dark:bg-teal-950/50 border border-teal-400 dark:border-teal-700 space-y-1.5 text-[11px]"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-extrabold text-teal-800 dark:text-teal-300 uppercase">
+                              Capturar SV (Pre-Nota)
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setEditingVitalsPatientId(null)}
+                                className="px-1.5 py-0.5 rounded bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-300 dark:border-slate-700 font-bold cursor-pointer"
+                              >
+                                Cancelar
+                              </button>
+                              <button
+                                type="submit"
+                                className="px-2 py-0.5 rounded bg-teal-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                              >
+                                <Check className="w-3 h-3" />
+                                <span>Guardar</span>
+                              </button>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 font-mono">
+                            <input
+                              type="text"
+                              value={vitalsDraft.bp}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, bp: e.target.value }))
+                              }
+                              placeholder="TA 120/80"
+                              title="TA (mmHg)"
+                              className="px-1.5 py-0.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-center font-bold"
+                            />
+                            <input
+                              type="text"
+                              value={vitalsDraft.hr}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, hr: e.target.value }))
+                              }
+                              placeholder="FC"
+                              title="FC (lpm)"
+                              className="px-1.5 py-0.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-center font-bold"
+                            />
+                            <input
+                              type="text"
+                              value={vitalsDraft.rr}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, rr: e.target.value }))
+                              }
+                              placeholder="FR"
+                              title="FR (rpm)"
+                              className="px-1.5 py-0.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-center font-bold"
+                            />
+                            <input
+                              type="text"
+                              value={vitalsDraft.temp}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, temp: e.target.value }))
+                              }
+                              placeholder="Temp"
+                              title="Temp (°C)"
+                              className="px-1.5 py-0.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-center font-bold"
+                            />
+                            <input
+                              type="text"
+                              value={vitalsDraft.spo2}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, spo2: e.target.value }))
+                              }
+                              placeholder="SpO2"
+                              title="SpO2 (%)"
+                              className="px-1.5 py-0.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-center font-bold"
+                            />
+                            <input
+                              type="text"
+                              value={vitalsDraft.glucose}
+                              onChange={(e) =>
+                                setVitalsDraft((prev) => ({ ...prev, glucose: e.target.value }))
+                              }
+                              placeholder="Gluc"
+                              title="Glucemia capilar"
+                              className="px-1.5 py-0.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-center font-bold"
+                            />
+                          </div>
+                        </form>
+                      ) : (
+                        <div
+                          onClick={(e) => {
+                            if (onUpdatePatient) {
+                              e.stopPropagation();
+                              openVitalsQuickEditor(patient);
+                            }
+                          }}
+                          title="Clic para capturar o actualizar Signos Vitales antes de la Nota"
+                          className="px-2 py-1 rounded-lg bg-slate-50 hover:bg-teal-50/60 dark:bg-slate-800/70 dark:hover:bg-teal-950/30 border border-slate-200/80 hover:border-teal-300 dark:border-slate-700/80 font-mono text-[11px] flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-slate-700 dark:text-slate-200 transition-colors"
+                        >
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                            <span className="font-extrabold text-teal-600 dark:text-teal-400">
+                              SV:
+                            </span>
+                            {patient.vitals?.isNew && (
+                              <span className="px-1 py-0.2 rounded bg-teal-600 text-white font-sans font-extrabold text-[9.5px]">
+                                PRE-NOTA
+                              </span>
+                            )}
+                            <span>
+                              TA <strong>{patient.vitals?.bp || '-'}</strong>
+                              {computedPam ? ` (PAM ${computedPam})` : ''}
+                            </span>
+                            <span>
+                              FC <strong>{patient.vitals?.hr || '-'}</strong>
+                            </span>
+                            <span>
+                              T <strong>{patient.vitals?.temp || '-'}°</strong>
+                            </span>
+                            <span>
+                              SpO2 <strong>{patient.vitals?.spo2 || '-'}%</strong>
+                            </span>
+                            {patient.vitals?.glucose && (
+                              <span>
+                                Gluc <strong>{patient.vitals.glucose}</strong>
+                              </span>
+                            )}
+                          </div>
+                          {onUpdatePatient && (
+                            <FileEdit className="w-3 h-3 text-teal-600 dark:text-teal-400 shrink-0" />
+                          )}
+                        </div>
+                      )}
 
                       {/* Key Lab Chips with Trend Arrows */}
                       {compactLabChips.length > 0 && (

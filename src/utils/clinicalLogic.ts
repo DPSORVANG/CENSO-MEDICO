@@ -1470,7 +1470,8 @@ export type LabParameterKey =
   | 'na'
   | 'k'
   | 'lactato'
-  | 'bun';
+  | 'bun'
+  | string;
 
 export interface LabNumericTrendResult {
   hasTrend: boolean;
@@ -1482,7 +1483,7 @@ export interface LabNumericTrendResult {
 
 /**
  * Computes the numeric change (delta = newerVal - olderVal), arrow direction,
- * and clinical color coding between two laboratory values.
+ * and clinical color coding between two laboratory values across all Internal Medicine panels.
  */
 export function calculateLabNumericTrend(
   param: LabParameterKey,
@@ -1510,11 +1511,29 @@ export function calculateLabNumericTrend(
   const absDiff = Math.abs(rawDiff);
 
   const isIntegerMetric =
-    param === 'leucos' || param === 'plaquetas' || param === 'glucosa' || param === 'bun';
+    param === 'leucos' ||
+    param === 'wbc' ||
+    param === 'plaquetas' ||
+    param === 'platelets' ||
+    param === 'glucosa' ||
+    param === 'glucose' ||
+    param === 'bun' ||
+    param === 'urea' ||
+    param === 'ldh' ||
+    param === 'cpk' ||
+    param === 'bnp' ||
+    param === 'dimerD' ||
+    param === 'ferritin' ||
+    param === 'pafi' ||
+    param === 'col_total' ||
+    param === 'ldl' ||
+    param === 'hdl' ||
+    param === 'trigliceridos';
 
-  const formattedNumber = isIntegerMetric
-    ? Math.round(absDiff).toLocaleString('en-US')
-    : Number(absDiff.toFixed(2)).toString();
+  const formattedNumber =
+    isIntegerMetric && absDiff >= 10
+      ? Math.round(absDiff).toLocaleString('en-US')
+      : Number(absDiff.toFixed(2)).toString();
 
   if (rawDiff === 0) {
     return {
@@ -1540,32 +1559,122 @@ export function calculateLabNumericTrend(
 
   let colorClass = greenBadge;
 
-  if (param === 'leucos') {
-    // Normal ~ 4,500 - 10,000. Decreasing from leukocytosis is green; rising above 10,000 is red.
+  const lowerIsBetterSet = new Set([
+    'creatinina',
+    'creatinine',
+    'bun',
+    'urea',
+    'uric_acid',
+    'lactato',
+    'lactate',
+    'pcr',
+    'procalcitonina',
+    'pct',
+    'vsg',
+    'ferritin',
+    'ast',
+    'alt',
+    'alp',
+    'ggt',
+    'biliTotal',
+    'biliDirect',
+    'biliIndirect',
+    'ldh',
+    'amonio',
+    'tp',
+    'inr',
+    'ttpa',
+    'dimerD',
+    'troponin',
+    'bnp',
+    'cpk',
+    'ck_mb',
+    'amilasa',
+    'lipasa',
+    'hba1c',
+    'col_total',
+    'ldl',
+    'trigliceridos',
+    'psa_total',
+    'cea',
+    'ca_19_9',
+    'ca_125',
+    'bandas',
+  ]);
+
+  const higherIsBetterSet = new Set([
+    'hb',
+    'hto',
+    'plaquetas',
+    'platelets',
+    'albumin',
+    'prot_totales',
+    'tfg',
+    'dep_cr_24h',
+    'po2',
+    'pafi',
+    'hdl',
+    'hierro_serico',
+    'sat_transf',
+    'vit_b12',
+    'ac_folico',
+    'vitamina_d',
+  ]);
+
+  const targetMidpoints: Record<string, { mid: number; min: number; max: number; severeOut?: boolean }> = {
+    glucosa: { mid: 120, min: 70, max: 180 },
+    glucose: { mid: 120, min: 70, max: 180 },
+    na: { mid: 140, min: 135, max: 145 },
+    sodium: { mid: 140, min: 135, max: 145 },
+    k: { mid: 4.2, min: 3.5, max: 5.0, severeOut: true },
+    potassium: { mid: 4.2, min: 3.5, max: 5.0, severeOut: true },
+    cl: { mid: 102, min: 98, max: 107 },
+    chloride: { mid: 102, min: 98, max: 107 },
+    calcium: { mid: 9.3, min: 8.5, max: 10.2 },
+    calcium_ion: { mid: 1.22, min: 1.12, max: 1.32 },
+    phosphorus: { mid: 3.5, min: 2.5, max: 4.5 },
+    magnesium: { mid: 2.05, min: 1.7, max: 2.4 },
+    ph: { mid: 7.4, min: 7.35, max: 7.45, severeOut: true },
+    pco2: { mid: 40, min: 35, max: 45 },
+    hco3: { mid: 24, min: 22, max: 26 },
+    eb: { mid: 0, min: -2, max: 2 },
+    anion_gap: { mid: 10, min: 8, max: 12 },
+    neutrophils: { mid: 55, min: 40, max: 70 },
+    lymphocytes: { mid: 30, min: 20, max: 45 },
+    vcm: { mid: 88, min: 80, max: 100 },
+    fibrinogen: { mid: 300, min: 200, max: 400 },
+    tsh: { mid: 2.0, min: 0.4, max: 4.5 },
+    t4_libre: { mid: 1.3, min: 0.8, max: 1.8 },
+    cortisol_am: { mid: 13, min: 6, max: 20 },
+    osmolarity: { mid: 285, min: 275, max: 295 },
+  };
+
+  if (param === 'leucos' || param === 'wbc') {
+    const isThousands = newerVal > 100 || olderVal > 100;
+    const lowThreshold = isThousands ? 3800 : 3.8;
+    const highThreshold = isThousands ? 10500 : 10.5;
     if (direction === 'down') {
-      colorClass = newerVal < 3800 ? amberBadge : greenBadge;
+      colorClass = newerVal < lowThreshold ? amberBadge : greenBadge;
     } else {
-      colorClass = newerVal > 10500 ? redBadge : greenBadge;
+      colorClass = newerVal > highThreshold ? redBadge : greenBadge;
     }
-  } else if (param === 'creatinina' || param === 'bun' || param === 'lactato') {
-    // Lower is better (renal recovery / lactate clearance)
+  } else if (lowerIsBetterSet.has(param)) {
     colorClass = direction === 'down' ? greenBadge : redBadge;
-  } else if (param === 'hb' || param === 'plaquetas') {
-    // Drop in Hb or Platelets is warning/alert; increase/recovery is green
+  } else if (higherIsBetterSet.has(param)) {
     colorClass = direction === 'up' ? greenBadge : redBadge;
-  } else if (param === 'glucosa') {
-    // Target hospital glucose 80 - 180 mg/dL
-    const inTarget = newerVal >= 70 && newerVal <= 180;
-    const closerTo120 = Math.abs(newerVal - 120) <= Math.abs(olderVal - 120);
-    colorClass = inTarget || closerTo120 ? greenBadge : amberBadge;
-  } else if (param === 'na') {
-    // Target Na 135 - 145 mEq/L (midpoint 140)
-    const closerTo140 = Math.abs(newerVal - 140) <= Math.abs(olderVal - 140);
-    colorClass = closerTo140 ? greenBadge : amberBadge;
-  } else if (param === 'k') {
-    // Target K 3.5 - 5.0 mEq/L (midpoint 4.2)
-    const closerTo42 = Math.abs(newerVal - 4.2) <= Math.abs(olderVal - 4.2);
-    colorClass = closerTo42 ? greenBadge : redBadge;
+  } else if (targetMidpoints[param]) {
+    const t = targetMidpoints[param];
+    const inTarget = newerVal >= t.min && newerVal <= t.max;
+    const closerToMid = Math.abs(newerVal - t.mid) <= Math.abs(olderVal - t.mid);
+    if (param === 'glucosa' || param === 'glucose') {
+      colorClass = inTarget || closerToMid ? greenBadge : amberBadge;
+    } else if (param === 'na' || param === 'sodium') {
+      colorClass = closerToMid ? greenBadge : amberBadge;
+    } else if (param === 'k' || param === 'potassium') {
+      colorClass = closerToMid ? greenBadge : redBadge;
+    } else {
+      colorClass = inTarget || closerToMid ? greenBadge : t.severeOut ? redBadge : amberBadge;
+    }
   }
 
   return {
@@ -2042,127 +2151,646 @@ export interface CompactLabChipItem {
   valueText: string;
   trend: 'up' | 'down' | 'same' | null;
   isAlert?: boolean;
+  panelId?: string;
+}
+
+export type ComparativeLabPanelGroupId =
+  | 'bhc'
+  | 'qs_renal'
+  | 'electrolitos'
+  | 'pfh'
+  | 'gasometria'
+  | 'coagulacion'
+  | 'inflamatorios_cardiacos'
+  | 'endocrino_otros';
+
+export interface ComparativeLabParamSpec {
+  key: string;
+  label: string;
+  shortLabel: string;
+  unit: string;
+  panelId: ComparativeLabPanelGroupId;
+  normalHint?: string;
+  alertLow?: number;
+  alertHigh?: number;
+}
+
+export interface ComparativeLabPanelGroupSpec {
+  id: ComparativeLabPanelGroupId;
+  name: string;
+  shortName: string;
+  accentColor: string;
+  badgeClass: string;
+  params: ComparativeLabParamSpec[];
+}
+
+export const COMPARATIVE_LAB_PANELS: ComparativeLabPanelGroupSpec[] = [
+  {
+    id: 'bhc',
+    name: 'Biometría Hemática (BHC)',
+    shortName: 'BHC',
+    accentColor: '#EF4444',
+    badgeClass:
+      'bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/50 dark:text-rose-200 dark:border-rose-800',
+    params: [
+      { key: 'leucos', label: 'Leucocitos', shortLabel: 'Leucos', unit: '/µL', panelId: 'bhc', alertLow: 4000, alertHigh: 11000 },
+      { key: 'hb', label: 'Hemoglobina (Hb)', shortLabel: 'Hb', unit: 'g/dL', panelId: 'bhc', alertLow: 9.5, alertHigh: 18.0 },
+      { key: 'hto', label: 'Hematocrito (Hto)', shortLabel: 'Hto', unit: '%', panelId: 'bhc', alertLow: 30, alertHigh: 54 },
+      { key: 'plaquetas', label: 'Plaquetas', shortLabel: 'Plaq', unit: '/µL', panelId: 'bhc', alertLow: 100000, alertHigh: 450000 },
+      { key: 'neutrophils', label: 'Neutrófilos', shortLabel: 'Neu%', unit: '%', panelId: 'bhc', alertLow: 40, alertHigh: 75 },
+      { key: 'lymphocytes', label: 'Linfocitos', shortLabel: 'Lin%', unit: '%', panelId: 'bhc', alertLow: 15, alertHigh: 45 },
+      { key: 'bandas', label: 'Bandas', shortLabel: 'Bandas', unit: '%', panelId: 'bhc', alertHigh: 5 },
+      { key: 'vcm', label: 'VCM', shortLabel: 'VCM', unit: 'fL', panelId: 'bhc', alertLow: 80, alertHigh: 100 },
+      { key: 'rdw', label: 'RDW / ADE', shortLabel: 'RDW', unit: '%', panelId: 'bhc', alertHigh: 15 },
+      { key: 'reticulocitos', label: 'Reticulocitos', shortLabel: 'Retis', unit: '%', panelId: 'bhc', alertHigh: 2.5 },
+    ],
+  },
+  {
+    id: 'qs_renal',
+    name: 'Química Sanguínea y Función Renal',
+    shortName: 'QS / Renal',
+    accentColor: '#0EA5E9',
+    badgeClass:
+      'bg-sky-50 text-sky-800 border-sky-200 dark:bg-sky-950/50 dark:text-sky-200 dark:border-sky-800',
+    params: [
+      { key: 'glucosa', label: 'Glucosa Sérica', shortLabel: 'Gluc', unit: 'mg/dL', panelId: 'qs_renal', alertLow: 70, alertHigh: 180 },
+      { key: 'creatinina', label: 'Creatinina (Cr)', shortLabel: 'Cr', unit: 'mg/dL', panelId: 'qs_renal', alertHigh: 1.3 },
+      { key: 'urea', label: 'Urea', shortLabel: 'Urea', unit: 'mg/dL', panelId: 'qs_renal', alertHigh: 45 },
+      { key: 'bun', label: 'Nitrógeno Ureico (BUN)', shortLabel: 'BUN', unit: 'mg/dL', panelId: 'qs_renal', alertHigh: 22 },
+      { key: 'tfg', label: 'TFG (CKD-EPI)', shortLabel: 'TFG', unit: 'mL/min', panelId: 'qs_renal', alertLow: 60 },
+      { key: 'uric_acid', label: 'Ácido Úrico', shortLabel: 'Ác.Úrico', unit: 'mg/dL', panelId: 'qs_renal', alertHigh: 7.2 },
+      { key: 'hba1c', label: 'HbA1c', shortLabel: 'HbA1c', unit: '%', panelId: 'qs_renal', alertHigh: 6.5 },
+      { key: 'osmolarity', label: 'Osmolaridad Sérica', shortLabel: 'Osm', unit: 'mOsm/kg', panelId: 'qs_renal', alertLow: 275, alertHigh: 298 },
+      { key: 'fena', label: 'FeNa', shortLabel: 'FeNa', unit: '%', panelId: 'qs_renal' },
+      { key: 'prot_24h', label: 'Proteinuria 24h', shortLabel: 'Prot24h', unit: 'mg/24h', panelId: 'qs_renal', alertHigh: 300 },
+    ],
+  },
+  {
+    id: 'electrolitos',
+    name: 'Electrólitos Séricos Completos (ES6)',
+    shortName: 'Electrólitos (ES6)',
+    accentColor: '#10B981',
+    badgeClass:
+      'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-200 dark:border-emerald-800',
+    params: [
+      { key: 'na', label: 'Sodio (Na)', shortLabel: 'Na', unit: 'mEq/L', panelId: 'electrolitos', alertLow: 132, alertHigh: 147 },
+      { key: 'k', label: 'Potasio (K)', shortLabel: 'K', unit: 'mEq/L', panelId: 'electrolitos', alertLow: 3.4, alertHigh: 5.2 },
+      { key: 'cl', label: 'Cloro (Cl)', shortLabel: 'Cl', unit: 'mEq/L', panelId: 'electrolitos', alertLow: 96, alertHigh: 108 },
+      { key: 'calcium', label: 'Calcio Total (Ca)', shortLabel: 'Ca', unit: 'mg/dL', panelId: 'electrolitos', alertLow: 8.4, alertHigh: 10.4 },
+      { key: 'calcium_ion', label: 'Calcio Iónico (Ca²⁺)', shortLabel: 'Ca²⁺', unit: 'mmol/L', panelId: 'electrolitos', alertLow: 1.1, alertHigh: 1.35 },
+      { key: 'phosphorus', label: 'Fósforo (P)', shortLabel: 'P', unit: 'mg/dL', panelId: 'electrolitos', alertLow: 2.4, alertHigh: 4.6 },
+      { key: 'magnesium', label: 'Magnesio (Mg)', shortLabel: 'Mg', unit: 'mg/dL', panelId: 'electrolitos', alertLow: 1.6, alertHigh: 2.6 },
+    ],
+  },
+  {
+    id: 'pfh',
+    name: 'Pruebas de Función Hepática (PFH)',
+    shortName: 'PFH',
+    accentColor: '#F59E0B',
+    badgeClass:
+      'bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-950/50 dark:text-amber-200 dark:border-amber-800',
+    params: [
+      { key: 'ast', label: 'AST / TGO', shortLabel: 'AST', unit: 'U/L', panelId: 'pfh', alertHigh: 40 },
+      { key: 'alt', label: 'ALT / TGP', shortLabel: 'ALT', unit: 'U/L', panelId: 'pfh', alertHigh: 45 },
+      { key: 'alp', label: 'Fosfatasa Alcalina (FA)', shortLabel: 'FA', unit: 'U/L', panelId: 'pfh', alertHigh: 130 },
+      { key: 'ggt', label: 'GGT', shortLabel: 'GGT', unit: 'U/L', panelId: 'pfh', alertHigh: 60 },
+      { key: 'biliTotal', label: 'Bilirrubina Total (BT)', shortLabel: 'BT', unit: 'mg/dL', panelId: 'pfh', alertHigh: 1.2 },
+      { key: 'biliDirect', label: 'Bilirrubina Directa (BD)', shortLabel: 'BD', unit: 'mg/dL', panelId: 'pfh', alertHigh: 0.4 },
+      { key: 'biliIndirect', label: 'Bilirrubina Indirecta (BI)', shortLabel: 'BI', unit: 'mg/dL', panelId: 'pfh', alertHigh: 0.9 },
+      { key: 'albumin', label: 'Albúmina Sérica (Alb)', shortLabel: 'Alb', unit: 'g/dL', panelId: 'pfh', alertLow: 3.4 },
+      { key: 'prot_totales', label: 'Proteínas Totales', shortLabel: 'ProtTot', unit: 'g/dL', panelId: 'pfh', alertLow: 6.0 },
+      { key: 'ldh', label: 'Deshidrogenasa Láctica (DHL)', shortLabel: 'DHL', unit: 'U/L', panelId: 'pfh', alertHigh: 240 },
+      { key: 'amonio', label: 'Amonio Sérico (NH3)', shortLabel: 'NH3', unit: 'µmol/L', panelId: 'pfh', alertHigh: 50 },
+    ],
+  },
+  {
+    id: 'gasometria',
+    name: 'Gasometría y Equilibrio Ácido-Base',
+    shortName: 'Gasometría',
+    accentColor: '#EC4899',
+    badgeClass:
+      'bg-pink-50 text-pink-800 border-pink-200 dark:bg-pink-950/50 dark:text-pink-200 dark:border-pink-800',
+    params: [
+      { key: 'ph', label: 'pH Gasométrico', shortLabel: 'pH', unit: '', panelId: 'gasometria', alertLow: 7.32, alertHigh: 7.48 },
+      { key: 'pco2', label: 'pCO2', shortLabel: 'pCO2', unit: 'mmHg', panelId: 'gasometria', alertLow: 32, alertHigh: 48 },
+      { key: 'po2', label: 'pO2', shortLabel: 'pO2', unit: 'mmHg', panelId: 'gasometria', alertLow: 65 },
+      { key: 'hco3', label: 'HCO3 (Bicarbonato)', shortLabel: 'HCO3', unit: 'mEq/L', panelId: 'gasometria', alertLow: 20, alertHigh: 28 },
+      { key: 'eb', label: 'Exceso de Base (EB)', shortLabel: 'EB', unit: 'mmol/L', panelId: 'gasometria', alertLow: -3, alertHigh: 3 },
+      { key: 'lactato', label: 'Lactato Sérico', shortLabel: 'Lac', unit: 'mmol/L', panelId: 'gasometria', alertHigh: 2.0 },
+      { key: 'pafi', label: 'Índice PaO2/FiO2 (Kirby)', shortLabel: 'PaFi', unit: 'mmHg', panelId: 'gasometria', alertLow: 250 },
+      { key: 'anion_gap', label: 'Brecha Aniónica (AG)', shortLabel: 'AG', unit: 'mEq/L', panelId: 'gasometria', alertHigh: 14 },
+    ],
+  },
+  {
+    id: 'coagulacion',
+    name: 'Coagulación y Hemostasia',
+    shortName: 'Coagulación',
+    accentColor: '#8B5CF6',
+    badgeClass:
+      'bg-purple-50 text-purple-800 border-purple-200 dark:bg-purple-950/50 dark:text-purple-200 dark:border-purple-800',
+    params: [
+      { key: 'tp', label: 'Tiempo de Protrombina (TP)', shortLabel: 'TP', unit: 's', panelId: 'coagulacion', alertHigh: 14.5 },
+      { key: 'inr', label: 'INR', shortLabel: 'INR', unit: '', panelId: 'coagulacion', alertHigh: 1.3 },
+      { key: 'ttpa', label: 'TTPa', shortLabel: 'TTPa', unit: 's', panelId: 'coagulacion', alertHigh: 36 },
+      { key: 'fibrinogen', label: 'Fibrinógeno', shortLabel: 'Fib', unit: 'mg/dL', panelId: 'coagulacion', alertLow: 180, alertHigh: 450 },
+      { key: 'dimerD', label: 'Dímero D', shortLabel: 'Dím-D', unit: 'ng/mL', panelId: 'coagulacion', alertHigh: 500 },
+    ],
+  },
+  {
+    id: 'inflamatorios_cardiacos',
+    name: 'Inflamación, Cardíaco y Pancreático',
+    shortName: 'Inflam / Cardio / Páncreas',
+    accentColor: '#DC2626',
+    badgeClass:
+      'bg-red-50 text-red-800 border-red-200 dark:bg-red-950/50 dark:text-red-200 dark:border-red-800',
+    params: [
+      { key: 'pcr', label: 'Proteína C Reactiva (PCR)', shortLabel: 'PCR', unit: 'mg/L', panelId: 'inflamatorios_cardiacos', alertHigh: 10 },
+      { key: 'procalcitonina', label: 'Procalcitonina (PCT)', shortLabel: 'PCT', unit: 'ng/mL', panelId: 'inflamatorios_cardiacos', alertHigh: 0.5 },
+      { key: 'vsg', label: 'VSG', shortLabel: 'VSG', unit: 'mm/h', panelId: 'inflamatorios_cardiacos', alertHigh: 25 },
+      { key: 'ferritin', label: 'Ferritina Sérica', shortLabel: 'Ferr', unit: 'ng/mL', panelId: 'inflamatorios_cardiacos', alertLow: 30, alertHigh: 400 },
+      { key: 'troponin', label: 'Troponina I/T', shortLabel: 'Trop', unit: 'ng/L', panelId: 'inflamatorios_cardiacos', alertHigh: 19 },
+      { key: 'bnp', label: 'BNP / NT-proBNP', shortLabel: 'BNP', unit: 'pg/mL', panelId: 'inflamatorios_cardiacos', alertHigh: 300 },
+      { key: 'cpk', label: 'CPK Total', shortLabel: 'CPK', unit: 'U/L', panelId: 'inflamatorios_cardiacos', alertHigh: 200 },
+      { key: 'ck_mb', label: 'CK-MB', shortLabel: 'CK-MB', unit: 'U/L', panelId: 'inflamatorios_cardiacos', alertHigh: 25 },
+      { key: 'amilasa', label: 'Amilasa Sérica', shortLabel: 'Amil', unit: 'U/L', panelId: 'inflamatorios_cardiacos', alertHigh: 120 },
+      { key: 'lipasa', label: 'Lipasa Sérica', shortLabel: 'Lip', unit: 'U/L', panelId: 'inflamatorios_cardiacos', alertHigh: 160 },
+    ],
+  },
+  {
+    id: 'endocrino_otros',
+    name: 'Tiroides, Lípidos, Hierro y Especiales',
+    shortName: 'Endocrino / Lípidos / Otros',
+    accentColor: '#6366F1',
+    badgeClass:
+      'bg-indigo-50 text-indigo-800 border-indigo-200 dark:bg-indigo-950/50 dark:text-indigo-200 dark:border-indigo-800',
+    params: [
+      { key: 'tsh', label: 'TSH', shortLabel: 'TSH', unit: 'mUI/L', panelId: 'endocrino_otros', alertLow: 0.4, alertHigh: 4.5 },
+      { key: 't4_libre', label: 'T4 Libre', shortLabel: 'T4L', unit: 'ng/dL', panelId: 'endocrino_otros', alertLow: 0.8, alertHigh: 1.8 },
+      { key: 't3_libre', label: 'T3 Libre', shortLabel: 'T3L', unit: 'pg/mL', panelId: 'endocrino_otros' },
+      { key: 'cortisol_am', label: 'Cortisol AM', shortLabel: 'CortAM', unit: 'µg/dL', panelId: 'endocrino_otros', alertLow: 5, alertHigh: 25 },
+      { key: 'pth', label: 'PTH Intacta', shortLabel: 'PTH', unit: 'pg/mL', panelId: 'endocrino_otros', alertHigh: 65 },
+      { key: 'vitamina_d', label: 'Vitamina D [25(OH)D]', shortLabel: 'VitD', unit: 'ng/mL', panelId: 'endocrino_otros', alertLow: 20 },
+      { key: 'col_total', label: 'Colesterol Total', shortLabel: 'ColT', unit: 'mg/dL', panelId: 'endocrino_otros', alertHigh: 200 },
+      { key: 'ldl', label: 'Colesterol LDL', shortLabel: 'LDL', unit: 'mg/dL', panelId: 'endocrino_otros', alertHigh: 130 },
+      { key: 'hdl', label: 'Colesterol HDL', shortLabel: 'HDL', unit: 'mg/dL', panelId: 'endocrino_otros', alertLow: 40 },
+      { key: 'trigliceridos', label: 'Triglicéridos', shortLabel: 'TG', unit: 'mg/dL', panelId: 'endocrino_otros', alertHigh: 150 },
+      { key: 'hierro_serico', label: 'Hierro Sérico', shortLabel: 'Fe', unit: 'µg/dL', panelId: 'endocrino_otros', alertLow: 50 },
+      { key: 'sat_transf', label: '% Sat. Transferrina', shortLabel: '%SatFe', unit: '%', panelId: 'endocrino_otros', alertLow: 20 },
+      { key: 'vit_b12', label: 'Vitamina B12', shortLabel: 'VitB12', unit: 'pg/mL', panelId: 'endocrino_otros', alertLow: 200 },
+      { key: 'ac_folico', label: 'Ácido Fólico', shortLabel: 'Folato', unit: 'ng/mL', panelId: 'endocrino_otros', alertLow: 4 },
+      { key: 'psa_total', label: 'APE / PSA Total', shortLabel: 'PSA', unit: 'ng/mL', panelId: 'endocrino_otros', alertHigh: 4.0 },
+      { key: 'cea', label: 'ACE / CEA', shortLabel: 'CEA', unit: 'ng/mL', panelId: 'endocrino_otros', alertHigh: 5.0 },
+      { key: 'ca_19_9', label: 'CA 19-9', shortLabel: 'CA19-9', unit: 'U/mL', panelId: 'endocrino_otros', alertHigh: 37 },
+      { key: 'ca_125', label: 'CA-125', shortLabel: 'CA-125', unit: 'U/mL', panelId: 'endocrino_otros', alertHigh: 35 },
+    ],
+  },
+];
+
+export interface ExtractedLabCell {
+  labId: string;
+  date: string;
+  time?: string;
+  displayValue: string;
+  compactValue: string;
+  numericValue?: number;
+  isAlert: boolean;
+}
+
+export interface ComparativeLabTableCell {
+  labId: string;
+  date: string;
+  time?: string;
+  formatted: string;
+  numericValue?: number;
+  isAlert: boolean;
+}
+
+export interface ComparativeLabRow {
+  key: string;
+  label: string;
+  shortLabel: string;
+  unit: string;
+  panelId: ComparativeLabPanelGroupId;
+  panelName: string;
+  panelShortName: string;
+  accentColor: string;
+  badgeClass: string;
+  valuesByLabId: Record<string, ExtractedLabCell>;
+  cells: ComparativeLabTableCell[];
+  latestCell: ExtractedLabCell | null;
+  previousCell: ExtractedLabCell | null;
+  latestFormatted: string | undefined;
+  previousFormatted: string | undefined;
+  trend: LabNumericTrendResult;
+}
+
+export interface ComparativeActivePanelInfo {
+  id: ComparativeLabPanelGroupId;
+  name: string;
+  shortName: string;
+  title: string;
+  shortTitle: string;
+  accentColor: string;
+  badgeClass: string;
+  activeParamCount: number;
+}
+
+export interface PatientComparativeLabAnalysis {
+  sortedOldestToNewest: Array<{ id: string; date: string; time?: string }>;
+  sortedNewestToOldest: Array<{ id: string; date: string; time?: string }>;
+  rows: ComparativeLabRow[];
+  rowsByPanel: Record<string, ComparativeLabRow[]>;
+  activePanels: ComparativeActivePanelInfo[];
+  panelsWithData: ComparativeActivePanelInfo[];
+}
+
+function getRawValueFromLabRecord(lab: Record<string, any>, key: string): number | string | undefined {
+  if (!lab) return undefined;
+  switch (key) {
+    case 'leucos':
+      return lab.leucos ?? lab.wbc ?? lab.extraParams?.wbc?.value;
+    case 'plaquetas':
+      return lab.plaquetas ?? lab.platelets ?? lab.extraParams?.platelets?.value;
+    case 'glucosa':
+      return lab.glucosa ?? lab.glucose ?? lab.extraParams?.glucose?.value;
+    case 'creatinina':
+      return lab.creatinina ?? lab.creatinine ?? lab.extraParams?.creatinine?.value;
+    case 'na':
+      return lab.na ?? lab.sodium ?? lab.extraParams?.sodium?.value;
+    case 'k':
+      return lab.k ?? lab.potassium ?? lab.extraParams?.potassium?.value;
+    case 'cl':
+      return lab.cl ?? lab.chloride ?? lab.extraParams?.chloride?.value;
+    case 'lactato':
+      return lab.lactato ?? lab.lactate ?? lab.extraParams?.lactate?.value;
+    case 'procalcitonina':
+      return lab.procalcitonina ?? lab.pct ?? lab.extraParams?.pct?.value;
+    default: {
+      if (lab[key] !== undefined && lab[key] !== null && lab[key] !== '') {
+        return lab[key];
+      }
+      if (lab.extraParams && lab.extraParams[key]?.value !== undefined && lab.extraParams[key].value !== '') {
+        return lab.extraParams[key].value;
+      }
+      return undefined;
+    }
+  }
+}
+
+export function extractLabParameterCell(
+  lab: Record<string, any>,
+  spec: ComparativeLabParamSpec
+): ExtractedLabCell | null {
+  const raw = getRawValueFromLabRecord(lab, spec.key);
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return null;
+  }
+
+  let numericValue: number | undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    numericValue = raw;
+  } else if (typeof raw === 'string') {
+    const cleaned = raw.replace(/,/g, '').trim();
+    const match = cleaned.match(/^[-+]?\d+(?:\.\d+)?/);
+    if (match) {
+      const parsed = parseFloat(match[0]);
+      if (Number.isFinite(parsed)) {
+        numericValue = parsed;
+      }
+    }
+  }
+
+  let displayValue = String(raw).trim();
+  let compactValue = displayValue;
+
+  if (numericValue !== undefined) {
+    if (spec.key === 'leucos' && numericValue >= 1000) {
+      displayValue = numericValue.toLocaleString('en-US');
+      compactValue = `${(numericValue / 1000).toFixed(1)}k`;
+    } else if (spec.key === 'plaquetas' && numericValue >= 1000) {
+      displayValue = numericValue.toLocaleString('en-US');
+      compactValue = `${(numericValue / 1000).toFixed(0)}k`;
+    } else if (typeof raw === 'number') {
+      displayValue = String(raw);
+      compactValue = String(raw);
+    }
+  }
+
+  let isAlert = false;
+  if (numericValue !== undefined) {
+    if (spec.alertLow !== undefined && numericValue < spec.alertLow) {
+      if ((spec.key === 'leucos' || spec.key === 'plaquetas') && numericValue < 900) {
+        const scaled = numericValue * 1000;
+        isAlert =
+          (spec.alertLow !== undefined && scaled < spec.alertLow) ||
+          (spec.alertHigh !== undefined && scaled > spec.alertHigh);
+      } else {
+        isAlert = true;
+      }
+    }
+    if (spec.alertHigh !== undefined && numericValue > spec.alertHigh) {
+      isAlert = true;
+    }
+  }
+
+  return {
+    labId: String(lab.id || ''),
+    date: String(lab.date || ''),
+    time: lab.time ? String(lab.time) : undefined,
+    displayValue,
+    compactValue,
+    numericValue,
+    isAlert,
+  };
+}
+
+/**
+ * Analyzes all laboratory records of a patient across all Internal Medicine panels,
+ * extracting every parameter present in any study, matching each parameter's most recent value
+ * with its previous recorded value, and computing its clinical trend and numeric delta (Δ).
+ */
+export function buildPatientComparativeLabAnalysis(
+  labs?: Array<Record<string, any>> | null
+): PatientComparativeLabAnalysis {
+  if (!labs || labs.length === 0) {
+    return {
+      sortedOldestToNewest: [],
+      sortedNewestToOldest: [],
+      rows: [],
+      rowsByPanel: {},
+      activePanels: [],
+      panelsWithData: [],
+    };
+  }
+
+  const normalizedLabs = labs.map((lab, idx) => ({
+    ...lab,
+    id: lab.id ? String(lab.id) : `lab-idx-${idx}`,
+  }));
+
+  const sortedOldestToNewest = [...normalizedLabs].sort((a, b) => {
+    const dtA = `${a.date || ''}T${a.time || '00:00'}`;
+    const dtB = `${b.date || ''}T${b.time || '00:00'}`;
+    return dtA.localeCompare(dtB);
+  });
+
+  const sortedNewestToOldest = [...sortedOldestToNewest].reverse();
+
+  const knownParamKeys = new Set<string>();
+  const rows: ComparativeLabRow[] = [];
+
+  for (const panel of COMPARATIVE_LAB_PANELS) {
+    for (const spec of panel.params) {
+      knownParamKeys.add(spec.key);
+      const valuesByLabId: Record<string, ExtractedLabCell> = {};
+      const chronologicalCells: ExtractedLabCell[] = [];
+      const cells: ComparativeLabTableCell[] = [];
+
+      for (const lab of sortedOldestToNewest) {
+        const cell = extractLabParameterCell(lab, spec);
+        if (cell) {
+          valuesByLabId[lab.id] = cell;
+          chronologicalCells.push(cell);
+          cells.push({
+            labId: String(lab.id),
+            date: String(lab.date || ''),
+            time: lab.time ? String(lab.time) : undefined,
+            formatted: cell.displayValue,
+            numericValue: cell.numericValue,
+            isAlert: cell.isAlert,
+          });
+        } else {
+          cells.push({
+            labId: String(lab.id),
+            date: String(lab.date || ''),
+            time: lab.time ? String(lab.time) : undefined,
+            formatted: '-',
+            isAlert: false,
+          });
+        }
+      }
+
+      if (chronologicalCells.length > 0) {
+        const latestCell = chronologicalCells[chronologicalCells.length - 1];
+        const previousCell =
+          chronologicalCells.length >= 2 ? chronologicalCells[chronologicalCells.length - 2] : null;
+        const trend = calculateLabNumericTrend(
+          spec.key,
+          previousCell?.numericValue,
+          latestCell?.numericValue
+        );
+
+        rows.push({
+          key: spec.key,
+          label: spec.label,
+          shortLabel: spec.shortLabel,
+          unit: spec.unit,
+          panelId: panel.id,
+          panelName: panel.name,
+          panelShortName: panel.shortName,
+          accentColor: panel.accentColor,
+          badgeClass: panel.badgeClass,
+          valuesByLabId,
+          cells,
+          latestCell,
+          previousCell,
+          latestFormatted: latestCell.compactValue,
+          previousFormatted: previousCell ? previousCell.compactValue : undefined,
+          trend,
+        });
+      }
+    }
+  }
+
+  // Also include any dynamic extraParams keys not already in knownParamKeys
+  const dynamicSpecsMap = new Map<string, { label: string; unit: string; panelHint?: string }>();
+  for (const lab of sortedOldestToNewest) {
+    if (lab.extraParams && typeof lab.extraParams === 'object') {
+      for (const [k, ep] of Object.entries(lab.extraParams)) {
+        if (
+          !knownParamKeys.has(k) &&
+          k !== 'wbc' &&
+          k !== 'platelets' &&
+          k !== 'glucose' &&
+          k !== 'creatinine' &&
+          k !== 'sodium' &&
+          k !== 'potassium' &&
+          k !== 'chloride' &&
+          k !== 'lactate' &&
+          k !== 'pct' &&
+          ep &&
+          typeof ep === 'object' &&
+          (ep as any).value
+        ) {
+          dynamicSpecsMap.set(k, {
+            label: (ep as any).label || k,
+            unit: (ep as any).unit || '',
+            panelHint: (ep as any).panel,
+          });
+        }
+      }
+    }
+  }
+
+  if (dynamicSpecsMap.size > 0) {
+    const fallbackPanel = COMPARATIVE_LAB_PANELS[COMPARATIVE_LAB_PANELS.length - 1];
+    for (const [dynKey, meta] of dynamicSpecsMap.entries()) {
+      const spec: ComparativeLabParamSpec = {
+        key: dynKey,
+        label: meta.label,
+        shortLabel: meta.label,
+        unit: meta.unit,
+        panelId: 'endocrino_otros',
+      };
+      const valuesByLabId: Record<string, ExtractedLabCell> = {};
+      const chronologicalCells: ExtractedLabCell[] = [];
+      const cells: ComparativeLabTableCell[] = [];
+
+      for (const lab of sortedOldestToNewest) {
+        const cell = extractLabParameterCell(lab, spec);
+        if (cell) {
+          valuesByLabId[lab.id] = cell;
+          chronologicalCells.push(cell);
+          cells.push({
+            labId: String(lab.id),
+            date: String(lab.date || ''),
+            time: lab.time ? String(lab.time) : undefined,
+            formatted: cell.displayValue,
+            numericValue: cell.numericValue,
+            isAlert: cell.isAlert,
+          });
+        } else {
+          cells.push({
+            labId: String(lab.id),
+            date: String(lab.date || ''),
+            time: lab.time ? String(lab.time) : undefined,
+            formatted: '-',
+            isAlert: false,
+          });
+        }
+      }
+
+      if (chronologicalCells.length > 0) {
+        const latestCell = chronologicalCells[chronologicalCells.length - 1];
+        const previousCell =
+          chronologicalCells.length >= 2 ? chronologicalCells[chronologicalCells.length - 2] : null;
+        const trend = calculateLabNumericTrend(
+          dynKey,
+          previousCell?.numericValue,
+          latestCell?.numericValue
+        );
+        rows.push({
+          key: dynKey,
+          label: meta.label,
+          shortLabel: meta.label,
+          unit: meta.unit,
+          panelId: fallbackPanel.id,
+          panelName: meta.panelHint || fallbackPanel.name,
+          panelShortName: meta.panelHint || fallbackPanel.shortName,
+          accentColor: fallbackPanel.accentColor,
+          badgeClass: fallbackPanel.badgeClass,
+          valuesByLabId,
+          cells,
+          latestCell,
+          previousCell,
+          latestFormatted: latestCell.compactValue,
+          previousFormatted: previousCell ? previousCell.compactValue : undefined,
+          trend,
+        });
+      }
+    }
+  }
+
+  const rowsByPanel: Record<string, ComparativeLabRow[]> = {};
+  for (const panel of COMPARATIVE_LAB_PANELS) {
+    rowsByPanel[panel.id] = rows.filter((r) => r.panelId === panel.id);
+  }
+
+  const activePanels: ComparativeActivePanelInfo[] = COMPARATIVE_LAB_PANELS.map((panel) => {
+    const count = (rowsByPanel[panel.id] || []).length;
+    return {
+      id: panel.id,
+      name: panel.name,
+      shortName: panel.shortName,
+      title: panel.name,
+      shortTitle: panel.shortName,
+      accentColor: panel.accentColor,
+      badgeClass: panel.badgeClass,
+      activeParamCount: count,
+    };
+  }).filter((p) => p.activeParamCount > 0);
+
+  return {
+    sortedOldestToNewest: sortedOldestToNewest.map((l) => ({
+      id: String(l.id || ''),
+      date: String(l.date || ''),
+      time: l.time ? String(l.time) : undefined,
+    })),
+    sortedNewestToOldest: sortedNewestToOldest.map((l) => ({
+      id: String(l.id || ''),
+      date: String(l.date || ''),
+      time: l.time ? String(l.time) : undefined,
+    })),
+    rows,
+    rowsByPanel,
+    activePanels,
+    panelsWithData: activePanels,
+  };
 }
 
 /**
  * Builds a concise array of key laboratory chips with trend direction vs previous lab
- * for the high-density Compact List View (Vista de Lista Compacta).
+ * for the high-density Compact List View (Vista de Lista Compacta), supporting all panels.
  */
 export function buildCompactLabSummaryItems(
-  latestLab?: {
-    leucos?: number;
-    hb?: number;
-    plaquetas?: number;
-    creatinina?: number;
-    glucosa?: number;
-    na?: number;
-    k?: number;
-    lactato?: number;
-    ph?: number;
-    pcr?: number;
-  } | null,
-  previousLab?: {
-    leucos?: number;
-    hb?: number;
-    plaquetas?: number;
-    creatinina?: number;
-    glucosa?: number;
-    na?: number;
-    k?: number;
-    lactato?: number;
-    ph?: number;
-    pcr?: number;
-  } | null
+  latestLab?: Record<string, any> | null,
+  previousLab?: Record<string, any> | null,
+  allLabs?: Array<Record<string, any>> | null
 ): CompactLabChipItem[] {
-  if (!latestLab) return [];
+  let sourceLabs: Array<Record<string, any>> = [];
+  if (allLabs && allLabs.length > 0) {
+    sourceLabs = allLabs;
+  } else {
+    if (previousLab) {
+      sourceLabs.push({
+        ...previousLab,
+        id: previousLab.id || 'prev-lab',
+        date: previousLab.date || '0000-01-01',
+      });
+    }
+    if (latestLab) {
+      sourceLabs.push({
+        ...latestLab,
+        id: latestLab.id || 'latest-lab',
+        date: latestLab.date || '9999-12-31',
+      });
+    }
+  }
+
+  if (sourceLabs.length === 0) return [];
+
+  const analysis = buildPatientComparativeLabAnalysis(sourceLabs);
+  if (analysis.rows.length === 0) return [];
+
   const items: CompactLabChipItem[] = [];
 
-  const getTrend = (curr?: number, prev?: number): 'up' | 'down' | 'same' | null => {
-    if (curr === undefined || prev === undefined) return null;
-    if (curr > prev) return 'up';
-    if (curr < prev) return 'down';
-    return 'same';
-  };
-
-  if (latestLab.leucos !== undefined) {
-    const fmt =
-      latestLab.leucos >= 1000
-        ? `${(latestLab.leucos / 1000).toFixed(1)}k`
-        : String(latestLab.leucos);
+  for (const row of analysis.rows) {
+    if (!row.latestCell) continue;
+    let trendDir: 'up' | 'down' | 'same' | null = null;
+    if (row.trend.hasTrend) {
+      trendDir =
+        row.trend.direction === 'up'
+          ? 'up'
+          : row.trend.direction === 'down'
+          ? 'down'
+          : 'same';
+    }
     items.push({
-      label: 'Leu',
-      valueText: fmt,
-      trend: getTrend(latestLab.leucos, previousLab?.leucos),
-      isAlert: latestLab.leucos >= 12000 || latestLab.leucos < 4000,
-    });
-  }
-
-  if (latestLab.hb !== undefined) {
-    items.push({
-      label: 'Hb',
-      valueText: String(latestLab.hb),
-      trend: getTrend(latestLab.hb, previousLab?.hb),
-      isAlert: latestLab.hb < 9.0,
-    });
-  }
-
-  if (latestLab.plaquetas !== undefined) {
-    const fmt =
-      latestLab.plaquetas >= 1000
-        ? `${(latestLab.plaquetas / 1000).toFixed(0)}k`
-        : String(latestLab.plaquetas);
-    items.push({
-      label: 'Plaq',
-      valueText: fmt,
-      trend: getTrend(latestLab.plaquetas, previousLab?.plaquetas),
-      isAlert: latestLab.plaquetas < 100000,
-    });
-  }
-
-  if (latestLab.creatinina !== undefined) {
-    items.push({
-      label: 'Cr',
-      valueText: String(latestLab.creatinina),
-      trend: getTrend(latestLab.creatinina, previousLab?.creatinina),
-      isAlert: latestLab.creatinina >= 1.3,
-    });
-  }
-
-  if (latestLab.glucosa !== undefined) {
-    items.push({
-      label: 'Gluc',
-      valueText: String(latestLab.glucosa),
-      trend: getTrend(latestLab.glucosa, previousLab?.glucosa),
-      isAlert: latestLab.glucosa >= 180 || latestLab.glucosa < 70,
-    });
-  }
-
-  if (latestLab.na !== undefined || latestLab.k !== undefined) {
-    items.push({
-      label: 'Na/K',
-      valueText: `${latestLab.na ?? '-'}/${latestLab.k ?? '-'}`,
-      trend: null,
-      isAlert:
-        (latestLab.na !== undefined && (latestLab.na < 130 || latestLab.na > 148)) ||
-        (latestLab.k !== undefined && (latestLab.k < 3.3 || latestLab.k > 5.2)),
-    });
-  }
-
-  if (latestLab.lactato !== undefined) {
-    items.push({
-      label: 'Lac',
-      valueText: String(latestLab.lactato),
-      trend: getTrend(latestLab.lactato, previousLab?.lactato),
-      isAlert: latestLab.lactato >= 2.0,
-    });
-  }
-
-  if (latestLab.ph !== undefined) {
-    items.push({
-      label: 'pH',
-      valueText: String(latestLab.ph),
-      trend: null,
-      isAlert: latestLab.ph < 7.32 || latestLab.ph > 7.48,
+      label: row.key === 'leucos' ? 'Leu' : row.shortLabel,
+      valueText: row.latestCell.compactValue,
+      trend: trendDir,
+      isAlert: row.latestCell.isAlert,
+      panelId: row.panelId,
     });
   }
 

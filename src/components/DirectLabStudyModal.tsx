@@ -127,13 +127,21 @@ export const DirectLabStudyModal: React.FC<DirectLabStudyModalProps> = ({
   useEffect(() => {
     if (targetPatient) {
       setSelectedPatientId(targetPatient.id);
+    } else if (
+      !selectedPatientId ||
+      !allPatients.some((p) => p.id === selectedPatientId && p.status === 'active')
+    ) {
+      const firstActive = allPatients.find((p) => p.status === 'active') || allPatients[0];
+      setSelectedPatientId(firstActive?.id || '');
     }
-  }, [targetPatient]);
+  }, [targetPatient, allPatients, selectedPatientId]);
 
   useEffect(() => {
     if (isOpen) {
       setFieldValues({});
       setLabNotes('');
+      setStudyTitle('');
+      setStudySummary('');
       setSavedSuccess(false);
     }
   }, [isOpen]);

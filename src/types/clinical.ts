@@ -286,6 +286,8 @@ export interface Patient {
     spo2: string;
     glucose?: string;
     weightKg?: number;
+    updatedAt?: string; // Hora de captura previa a la nota (ej. "07:15")
+    isNew?: boolean; // Capturado en el pre-pase/pase, listo para integrarse en la Nota de Evolución
   };
   initialDiet?: string; // Dieta base de ingreso (no cambia en retroceso a menos que se edite en Ingreso)
   initialDietSpecialNotes?: string; // Indicaciones especiales de dieta al ingreso

@@ -627,4 +627,109 @@ test('buildCompactLabSummaryItems formats compact lab chips with trends and aler
   assert.equal(lacChip.isAlert, true);
 });
 
+test('buildPatientComparativeLabAnalysis compares all laboratory panels (BHC, QS, ES6, PFH, Gaso, Coag, Inflam, ExtraParams) chronologically with trends', async () => {
+  const { buildPatientComparativeLabAnalysis } = await import('./clinicalLogic.ts');
+  const labs = [
+    {
+      id: 'l-new',
+      date: '2026-10-27',
+      time: '06:30',
+      hb: 11.4,
+      leucos: 8900,
+      plaquetas: 220000,
+      creatinina: 1.1,
+      urea: 36,
+      na: 139,
+      k: 4.1,
+      calcium: '9.0',
+      phosphorus: '3.5',
+      magnesium: '2.0',
+      biliTotal: '1.2',
+      ast: '32',
+      alt: '35',
+      albumin: '3.4',
+      ph: 7.39,
+      pco2: 37,
+      hco3: 23.0,
+      lactato: 1.1,
+      inr: '1.12',
+      pcr: 14.0,
+      procalcitonina: 0.4,
+      extraParams: {
+        tsh: { label: 'TSH', value: '2.4', unit: 'mUI/L', panelId: 'endocrino' },
+      },
+    },
+    {
+      id: 'l-old',
+      date: '2026-10-24',
+      time: '06:30',
+      hb: 10.6,
+      leucos: 15200,
+      plaquetas: 180000,
+      creatinina: 1.9,
+      urea: 68,
+      na: 134,
+      k: 4.8,
+      calcium: '8.3',
+      phosphorus: '4.4',
+      magnesium: '1.6',
+      biliTotal: '2.8',
+      ast: '78',
+      alt: '84',
+      albumin: '2.9',
+      ph: 7.29,
+      pco2: 31,
+      hco3: 16.5,
+      lactato: 2.9,
+      inr: '1.48',
+      pcr: 68.0,
+      procalcitonina: 3.2,
+      extraParams: {
+        tsh: { label: 'TSH', value: '4.8', unit: 'mUI/L', panelId: 'endocrino' },
+      },
+    },
+  ];
+
+  const analysis = buildPatientComparativeLabAnalysis(labs);
+  assert.ok(analysis.panelsWithData.length >= 7);
+
+  // Verify PFH (Bilirrubina Total & AST) trends
+  const btRow = analysis.rows.find((r) => r.key === 'biliTotal');
+  assert.ok(btRow);
+  assert.equal(btRow.panelId, 'pfh');
+  assert.equal(btRow.previousFormatted, '2.8');
+  assert.equal(btRow.latestFormatted, '1.2');
+  assert.equal(btRow.trend.direction, 'down');
+  assert.equal(btRow.trend.formattedDiff, '-1.6');
+  assert.ok(btRow.trend.colorClass.includes('emerald'));
+
+  // Verify Albumin (higher is better)
+  const albRow = analysis.rows.find((r) => r.key === 'albumin');
+  assert.ok(albRow);
+  assert.equal(albRow.trend.direction, 'up');
+  assert.equal(albRow.trend.formattedDiff, '+0.5');
+  assert.ok(albRow.trend.colorClass.includes('emerald'));
+
+  // Verify Gasometry pH (homeostatic target 7.40: 7.29 -> 7.39 is improvement)
+  const phRow = analysis.rows.find((r) => r.key === 'ph');
+  assert.ok(phRow);
+  assert.equal(phRow.trend.direction, 'up');
+  assert.ok(phRow.trend.colorClass.includes('emerald'));
+
+  // Verify Coagulation INR (1.48 -> 1.12 is improvement)
+  const inrRow = analysis.rows.find((r) => r.key === 'inr');
+  assert.ok(inrRow);
+  assert.equal(inrRow.panelId, 'coagulacion');
+  assert.equal(inrRow.trend.direction, 'down');
+  assert.ok(inrRow.trend.colorClass.includes('emerald'));
+
+  // Verify Endocrine / extraParams (TSH)
+  const tshRow = analysis.rows.find((r) => r.key === 'tsh');
+  assert.ok(tshRow);
+  assert.equal(tshRow.panelId, 'endocrino_otros');
+  assert.equal(tshRow.previousFormatted, '4.8');
+  assert.equal(tshRow.latestFormatted, '2.4');
+  assert.equal(tshRow.trend.direction, 'down');
+});
+
 

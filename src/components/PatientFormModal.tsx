@@ -76,8 +76,6 @@ export const PatientFormModal: React.FC<PatientFormModalProps> = ({
   onAddNewTagToCatalog,
   onOpenSettings,
 }) => {
-  if (!isOpen) return null;
-
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
@@ -308,6 +306,8 @@ export const PatientFormModal: React.FC<PatientFormModalProps> = ({
 
   const [isCopied, setIsCopied] = useState(false);
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
+
+  if (!isOpen) return null;
 
   const handleCopySection = async (key: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -707,7 +707,7 @@ export const PatientFormModal: React.FC<PatientFormModalProps> = ({
     <div className="fixed inset-0 z-50 bg-slate-900/85 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
       <div className="bg-white dark:bg-slate-900 w-full max-w-5xl rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col h-[92vh] overflow-hidden">
         {/* Modal Top Header with Mode Switcher */}
-        <div className="px-6 py-4 bg-slate-900 text-white flex flex-wrap items-center justify-between border-b border-slate-800 gap-4">
+        <div className="px-6 py-4 bg-slate-900 text-white flex flex-wrap items-center justify-between border-b border-slate-800 gap-4 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-teal-500/20 text-teal-400 border border-teal-500/30 flex items-center justify-center">
               <UserPlus className="w-6 h-6" />
@@ -777,7 +777,7 @@ export const PatientFormModal: React.FC<PatientFormModalProps> = ({
 
         {/* Validation Error Alert Banner (Visible in both Express & NOM-004 modes) */}
         {validationError && (
-          <div className="mx-6 mt-3 px-4 py-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-300 dark:border-rose-700 text-rose-800 dark:text-rose-200 text-xs font-bold flex items-center justify-between gap-2 shadow-xs">
+          <div className="mx-6 mt-3 px-4 py-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-300 dark:border-rose-700 text-rose-800 dark:text-rose-200 text-xs font-bold flex items-center justify-between gap-2 shadow-xs shrink-0">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
               <span>{validationError}</span>
@@ -794,7 +794,7 @@ export const PatientFormModal: React.FC<PatientFormModalProps> = ({
 
         {/* MODE 1: INGRESO RÁPIDO / EXPRESS */}
         {mode === 'express' ? (
-          <form onSubmit={handleFinalSubmit} noValidate className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
+          <form onSubmit={handleFinalSubmit} noValidate className="flex-1 min-h-0 overflow-y-auto p-6 space-y-5 text-xs">
 
             {/* Basic Info */}
             <div className="bg-slate-50 dark:bg-slate-850 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
@@ -1467,9 +1467,9 @@ export const PatientFormModal: React.FC<PatientFormModalProps> = ({
           </form>
         ) : (
           /* MODE 2: HISTORIA CLÍNICA COMPLETA NOM-004 */
-          <form onSubmit={handleFinalSubmit} noValidate className="flex-1 overflow-hidden flex flex-col">
+          <form onSubmit={handleFinalSubmit} noValidate className="flex-1 min-h-0 overflow-hidden flex flex-col">
             {/* Persistent Author & Quick Navigation Bar */}
-            <div className="px-6 py-2 bg-teal-950/20 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="px-6 py-2 bg-teal-950/20 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
               <div className="flex items-center gap-2 flex-1 min-w-[260px]">
                 <User className="w-3.5 h-3.5 text-teal-600 shrink-0" />
                 <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300 shrink-0">
@@ -1506,7 +1506,7 @@ export const PatientFormModal: React.FC<PatientFormModalProps> = ({
             </div>
 
             {/* Steps / Sub-tabs */}
-            <div className="px-6 pt-3 pb-2 bg-slate-100 dark:bg-slate-950/60 border-b border-slate-200 dark:border-slate-800 flex items-center gap-2 overflow-x-auto text-xs font-semibold">
+            <div className="px-6 pt-3 pb-2 bg-slate-100 dark:bg-slate-950/60 border-b border-slate-200 dark:border-slate-800 flex items-center gap-2 overflow-x-auto text-xs font-semibold shrink-0 min-h-[44px]">
               <button
                 type="button"
                 onClick={() => setHistoryTab('ficha-ahf')}
@@ -1565,7 +1565,7 @@ export const PatientFormModal: React.FC<PatientFormModalProps> = ({
             </div>
 
             {/* Sub-tab Body */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4 text-xs">
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4 text-xs">
               {/* TAB 1: FICHA & ANTECEDENTES */}
               {historyTab === 'ficha-ahf' && (
                 <div className="space-y-4">

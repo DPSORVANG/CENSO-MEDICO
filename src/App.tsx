@@ -39,6 +39,8 @@ import {
   unmarkDeletedPatient,
   exportFullBackup,
   setActiveAccountNamespace,
+  resetDemoDataInCurrentNamespace,
+  clearAllPatientsInCurrentNamespace,
   normalizePatientRecord,
   BackupPackage,
 } from './utils/storage.ts';
@@ -59,7 +61,7 @@ import {
   downloadCensusFromDrive,
   saveCensusToDrive,
 } from './utils/googleDriveSync.ts';
-import { WifiOff, GitMerge, Cloud, LogOut } from 'lucide-react';
+import { WifiOff, GitMerge, Cloud, LogOut, FlaskConical, Trash2 } from 'lucide-react';
 
 export default function App() {
   const [workspaceMode, setWorkspaceModeState] = useState<WorkspaceMode>(() => getWorkspaceMode());
@@ -414,8 +416,36 @@ export default function App() {
     setPendingChangesCount(getPendingMutations().length);
   }, []);
 
+  const handleLoad100StressTestPatients = useCallback(() => {
+    resetDemoDataInCurrentNamespace();
+    const loadedPts = loadPatients();
+    const loadedNts = loadNotes();
+    setPatients(loadedPts);
+    setNotes(loadedNts);
+    scheduleAuthoritativeDrivePush(300, loadedPts, loadedNts, {});
+    showToast(`🧪 Prueba de estrés activada: ${loadedPts.length} pacientes clínicos completos cargados.`);
+  }, [scheduleAuthoritativeDrivePush, showToast]);
+
+  const handleClearAllPatients = useCallback(() => {
+    clearAllPatientsInCurrentNamespace();
+    setPatients([]);
+    setNotes([]);
+    scheduleAuthoritativeDrivePush(300, [], [], loadDeletedPatients());
+    showToast('🧹 Censo vaciado a 0 pacientes.');
+  }, [scheduleAuthoritativeDrivePush, showToast]);
+
   // Initialize data & cross-tab storage synchronization
   useEffect(() => {
+    // Auto-seed the 100 stress-test patients once so the user can immediately test all features with 100 patients
+    if (typeof window !== 'undefined' && localStorage.getItem('resimed_stress_test_100_autoseed_v1') !== 'done') {
+      localStorage.setItem('resimed_stress_test_100_autoseed_v1', 'done');
+      if (!getWorkspaceMode()) {
+        setActiveAccountNamespace('demo');
+        setWorkspaceMode('demo');
+      }
+      resetDemoDataInCurrentNamespace();
+    }
+
     handleReloadData();
 
     // If already in 'drive' workspace mode with a valid token on startup, pull authoritative state from Drive immediately
@@ -492,12 +522,14 @@ export default function App() {
       ...updated,
       lastUpdated: new Date().toISOString(),
     };
-    const newPatients = patients.map((p) => (p.id === withTimestamp.id ? withTimestamp : p));
-    setPatients(newPatients);
-    savePatients(newPatients);
+    setPatients((prev) => {
+      const next = prev.map((p) => (p.id === withTimestamp.id ? withTimestamp : p));
+      savePatients(next);
+      return next;
+    });
     recordOfflineMutation('patient_updated', withTimestamp.id, `Actualizado ${withTimestamp.name} (${withTimestamp.bed})`);
     setPendingChangesCount(getPendingMutations().length);
-    scheduleAuthoritativeDrivePush(350, newPatients);
+    scheduleAuthoritativeDrivePush(350);
     if (selectedPatientForDetail?.id === withTimestamp.id) {
       setSelectedPatientForDetail(withTimestamp);
     }
@@ -516,21 +548,22 @@ export default function App() {
       ...savedPatient,
       lastUpdated: new Date().toISOString(),
     };
-    const exists = patients.some((p) => p.id === withTimestamp.id);
-    let newPatients: Patient[];
-    if (exists) {
-      newPatients = patients.map((p) => (p.id === withTimestamp.id ? withTimestamp : p));
-      showToast(`Paciente ${withTimestamp.name} actualizado.`);
-      recordOfflineMutation('patient_updated', withTimestamp.id, `Actualización de ${withTimestamp.name} (${withTimestamp.bed})`);
-    } else {
-      newPatients = [withTimestamp, ...patients];
-      showToast(`Nuevo paciente ${withTimestamp.name} ingresado a ${withTimestamp.bed}.`);
-      recordOfflineMutation('patient_created', withTimestamp.id, `Ingreso de ${withTimestamp.name} en ${withTimestamp.bed}`);
-    }
-    setPatients(newPatients);
-    savePatients(newPatients);
+    setPatients((prev) => {
+      const exists = prev.some((p) => p.id === withTimestamp.id);
+      let next: Patient[];
+      if (exists) {
+        next = prev.map((p) => (p.id === withTimestamp.id ? withTimestamp : p));
+        showToast(`Paciente ${withTimestamp.name} actualizado.`);
+        recordOfflineMutation('patient_updated', withTimestamp.id, `Actualización de ${withTimestamp.name} (${withTimestamp.bed})`);
+      } else {
+        next = [withTimestamp, ...prev];
+        showToast(`Nuevo paciente ${withTimestamp.name} ingresado a ${withTimestamp.bed}.`);
+        recordOfflineMutation('patient_created', withTimestamp.id, `Ingreso de ${withTimestamp.name} en ${withTimestamp.bed}`);
+      }
+      savePatients(next);
+      return next;
+    });
 
-    let updatedNotes = notes;
     if (generatedHistoryText && generatedHistoryText.trim()) {
       const today = new Date().toISOString().split('T')[0];
       const time = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
@@ -555,41 +588,45 @@ export default function App() {
         createdAtTimestamp: Date.now(),
       };
 
-      updatedNotes = [admissionNote, ...notes];
-      setNotes(updatedNotes);
-      saveNotes(updatedNotes);
+      setNotes((prev) => {
+        const updatedNotes = [admissionNote, ...prev];
+        saveNotes(updatedNotes);
+        return updatedNotes;
+      });
       recordOfflineMutation('note_created', admissionNote.id, `Nota de ingreso para ${withTimestamp.name}`);
       showToast(`Historia Clínica NOM-004 archivada en bóveda (${auditHash.slice(0, 14)}...)`);
     }
 
     setPendingChangesCount(getPendingMutations().length);
-    scheduleAuthoritativeDrivePush(300, newPatients, updatedNotes);
+    scheduleAuthoritativeDrivePush(300);
   };
 
   // 4-Stage Chained Pending Workflow handler
   const handleTogglePending = (patientId: string, pendingId: string) => {
     let stageFeedback: string | null = null;
-    const updated = patients.map((p) => {
-      if (p.id !== patientId) return p;
-      const updatedPendings = p.pendings.map((pen) => {
-        if (pen.id !== pendingId) return pen;
-        const { updatedPending: nextPen, nextStageReached } = advancePendingWorkflow(pen);
-        if (nextStageReached === 'collect') {
-          stageFeedback = `Paso 2/3 activado: ${nextPen.text}`;
-        } else if (nextStageReached === 'register_census') {
-          stageFeedback = `Paso 3/3 activado: ${nextPen.text} (Usa "+ Lab/Imagen" para capturar resultados)`;
-        } else if (nextStageReached === 'done') {
-          stageFeedback = `Pendiente completado: ${pen.text}`;
-        }
-        return nextPen;
+    setPatients((prev) => {
+      const updated = prev.map((p) => {
+        if (p.id !== patientId) return p;
+        const updatedPendings = p.pendings.map((pen) => {
+          if (pen.id !== pendingId) return pen;
+          const { updatedPending: nextPen, nextStageReached } = advancePendingWorkflow(pen);
+          if (nextStageReached === 'collect') {
+            stageFeedback = `Paso 2/3 activado: ${nextPen.text}`;
+          } else if (nextStageReached === 'register_census') {
+            stageFeedback = `Paso 3/3 activado: ${nextPen.text} (Usa "+ Lab/Imagen" para capturar resultados)`;
+          } else if (nextStageReached === 'done') {
+            stageFeedback = `Pendiente completado: ${pen.text}`;
+          }
+          return nextPen;
+        });
+        return { ...p, pendings: updatedPendings, lastUpdated: new Date().toISOString() };
       });
-      return { ...p, pendings: updatedPendings, lastUpdated: new Date().toISOString() };
+      savePatients(updated);
+      return updated;
     });
-    setPatients(updated);
-    savePatients(updated);
     recordOfflineMutation('patient_updated', patientId, 'Pendiente actualizado');
     setPendingChangesCount(getPendingMutations().length);
-    scheduleAuthoritativeDrivePush(400, updated);
+    scheduleAuthoritativeDrivePush(400);
     if (stageFeedback) {
       showToast(stageFeedback);
     }
@@ -597,19 +634,21 @@ export default function App() {
 
   // Add Quick Pending from Census Card or Checklist
   const handleAddQuickPending = (patientId: string, newPending: ClinicalPending) => {
-    const updated = patients.map((p) => {
-      if (p.id !== patientId) return p;
-      return {
-        ...p,
-        pendings: [newPending, ...p.pendings],
-        lastUpdated: new Date().toISOString(),
-      };
+    setPatients((prev) => {
+      const updated = prev.map((p) => {
+        if (p.id !== patientId) return p;
+        return {
+          ...p,
+          pendings: [newPending, ...p.pendings],
+          lastUpdated: new Date().toISOString(),
+        };
+      });
+      savePatients(updated);
+      return updated;
     });
-    setPatients(updated);
-    savePatients(updated);
     recordOfflineMutation('patient_updated', patientId, `Nuevo pendiente: ${newPending.text}`);
     setPendingChangesCount(getPendingMutations().length);
-    scheduleAuthoritativeDrivePush(400, updated);
+    scheduleAuthoritativeDrivePush(400);
     showToast(`Pendiente agregado: ${newPending.text}`);
   };
 
@@ -688,12 +727,14 @@ export default function App() {
   };
 
   const handleSaveNote = (newNote: ClinicalNoteRecord) => {
-    const updatedNotes = [newNote, ...notes];
-    setNotes(updatedNotes);
-    saveNotes(updatedNotes);
+    setNotes((prev) => {
+      const updatedNotes = [newNote, ...prev];
+      saveNotes(updatedNotes);
+      return updatedNotes;
+    });
     recordOfflineMutation('note_created', newNote.patientId, `Nota ${newNote.noteType} para ${newNote.patientName}`);
     setPendingChangesCount(getPendingMutations().length);
-    scheduleAuthoritativeDrivePush(400, patients, updatedNotes);
+    scheduleAuthoritativeDrivePush(400);
     showToast(`Nota respaldada en bóveda (${newNote.auditHash.slice(0, 14)}...)`);
   };
 
@@ -936,7 +977,26 @@ export default function App() {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            onClick={handleLoad100StressTestPatients}
+            className="px-2 py-0.5 rounded bg-purple-600/30 hover:bg-purple-600/50 border border-purple-400/40 text-purple-200 font-bold flex items-center gap-1 cursor-pointer transition-colors"
+            title="Cargar 100 pacientes clínicos completos para prueba de estrés del sistema"
+          >
+            <FlaskConical className="w-3 h-3 text-purple-300" />
+            <span>Cargar 100 Pacientes Prueba</span>
+          </button>
+          {patients.length > 0 && (
+            <button
+              onClick={handleClearAllPatients}
+              className="px-2 py-0.5 rounded bg-rose-900/40 hover:bg-rose-800/60 border border-rose-500/40 text-rose-200 font-bold flex items-center gap-1 cursor-pointer transition-colors"
+              title="Vaciar todos los pacientes del censo actual (dejar en 0)"
+            >
+              <Trash2 className="w-3 h-3 text-rose-300" />
+              <span>Vaciar (0)</span>
+            </button>
+          )}
+          <span className="text-slate-600">|</span>
           <button
             onClick={() => setIsDriveSyncOpen(true)}
             className="text-teal-300 hover:text-teal-200 font-bold underline cursor-pointer"
@@ -1104,6 +1164,7 @@ export default function App() {
       {/* Modals */}
       {selectedPatientForDetail && (
         <PatientDetailModal
+          key={selectedPatientForDetail.id}
           patient={selectedPatientForDetail}
           profile={profile}
           isOpen={Boolean(selectedPatientForDetail)}
@@ -1138,6 +1199,7 @@ export default function App() {
 
       {selectedPatientForNote && (
         <NoteGeneratorModal
+          key={selectedPatientForNote.id}
           patient={selectedPatientForNote}
           profile={profile}
           isOpen={Boolean(selectedPatientForNote)}
@@ -1162,6 +1224,7 @@ export default function App() {
 
       {isPatientFormOpen && (
         <PatientFormModal
+          key={patientToEdit?.id || 'new-patient'}
           isOpen={isPatientFormOpen}
           onClose={() => {
             setIsPatientFormOpen(false);
